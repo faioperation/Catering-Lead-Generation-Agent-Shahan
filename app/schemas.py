@@ -1,7 +1,6 @@
 from typing import Optional, List
 from pydantic import BaseModel, Field
 
-
 class LeadSearchRequest(BaseModel):
     location: str = Field(
         ...,
@@ -54,6 +53,21 @@ class LeadSearchRequest(BaseModel):
         description="Apify business lead enrichment records per place."
     )
 
+    radius_miles: float = Field(
+        default=10.0,
+        description="Radius in miles from the reference location to filter leads."
+    )
+
+    reference_lat: Optional[float] = Field(
+        None,
+        description="Latitude of the reference location (e.g., restaurant)."
+    )
+
+    reference_lng: Optional[float] = Field(
+        None,
+        description="Longitude of the reference location (e.g., restaurant)."
+    )
+
 
 class Lead(BaseModel):
     business_name: Optional[str] = None
@@ -64,6 +78,8 @@ class Lead(BaseModel):
     category: Optional[str] = None
     google_maps_url: Optional[str] = None
     source: str = "apify_google_places"
+    lat: Optional[float] = None
+    lng: Optional[float] = None
 
 
 class LeadSearchResponse(BaseModel):

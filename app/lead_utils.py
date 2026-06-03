@@ -149,6 +149,15 @@ def normalize_lead(item: Dict[str, Any]) -> Dict[str, Any]:
         or item.get("mapsUrl")
     )
 
+    lat = item.get("lat") or item.get("latitude")
+    lng = item.get("lng") or item.get("longitude")
+
+    # Apify's Google Places scraper often returns location in a nested object
+    if not lat and isinstance(item.get("location"), dict):
+        lat = item.get("location", {}).get("lat")
+    if not lng and isinstance(item.get("location"), dict):
+        lng = item.get("location", {}).get("lng")
+
     return {
         "business_name": business_name,
         "phone": phone,
@@ -158,6 +167,8 @@ def normalize_lead(item: Dict[str, Any]) -> Dict[str, Any]:
         "category": category,
         "google_maps_url": google_maps_url,
         "source": "apify_google_places",
+        "lat": lat,
+        "lng": lng,
     }
 
 
