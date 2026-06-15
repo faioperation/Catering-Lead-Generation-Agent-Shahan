@@ -1,12 +1,17 @@
 # app/main.py
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+
 from app.schemas import LeadSearchRequest, LeadSearchResponse, Lead
 from app.apify_service import ApifyService
 from app.n8n_service import N8NService
 from app.lead_utils import normalize_lead, is_valid_lead
 
 from geopy.distance import geodesic
+
 
 app = FastAPI(
     title="Google Places Lead Generation API",
@@ -23,13 +28,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
+
+FRONTEND_PATH = Path(__file__).parent / "frontend" / "index.html"
+
+
+@app.get("/", include_in_schema=False)
 def root():
-    return {"message": "Lead Generation API is running", "docs": "/docs"}
+    return FileResponse(FRONTEND_PATH)
+
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
 
 @app.post("/api/leads/generate", response_model=LeadSearchResponse)
 async def generate_leads(request: LeadSearchRequest, background_tasks: BackgroundTasks):
@@ -53,8 +64,10 @@ async def generate_leads(request: LeadSearchRequest, background_tasks: Backgroun
         # 2. Normalize & filter by phone/email
         # -------------------------
         valid_leads = []
+
         for item in raw_results:
             normalized = normalize_lead(item)
+
             if is_valid_lead(
                 normalized,
                 require_email=request.require_email,
@@ -63,17 +76,20 @@ async def generate_leads(request: LeadSearchRequest, background_tasks: Backgroun
                 valid_leads.append(normalized)
 
         # -------------------------
-        # 3. Apply radius filter locally (optional)
+        # 3. Apply radius filter locally
         # -------------------------
         if request.reference_lat is not None and request.reference_lng is not None:
             ref_coords = (request.reference_lat, request.reference_lng)
             filtered_leads = []
+
             for lead in valid_leads:
                 lat = lead.get("lat") or lead.get("latitude")
                 lng = lead.get("lng") or lead.get("longitude")
+
                 if lat and lng:
                     if geodesic(ref_coords, (lat, lng)).miles <= request.radius_miles:
                         filtered_leads.append(lead)
+
             valid_leads = filtered_leads
 
         # -------------------------
@@ -96,12 +112,13 @@ async def generate_leads(request: LeadSearchRequest, background_tasks: Backgroun
             status="success",
             total_raw_results=len(raw_results),
             total_valid_leads=len(valid_leads),
-            total_sent_to_n8n=0,  # async
+            total_sent_to_n8n=0,
             leads=[Lead(**lead) for lead in valid_leads]
         )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # -------------------------
 # n8n test endpoint
@@ -122,10 +139,12 @@ async def test_n8n():
     try:
         n8n_service = N8NService()
         await n8n_service.send_lead(test_lead)
+
         return {
             "status": "success",
             "message": "Test lead sent to n8n",
             "lead": test_lead
         }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

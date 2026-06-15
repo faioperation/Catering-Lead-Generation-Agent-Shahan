@@ -1,0 +1,1020 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Catering Lead Agent</title>
+
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: rgba(255, 255, 255, 0.08);
+      --panel-strong: rgba(255, 255, 255, 0.13);
+      --border: rgba(255, 255, 255, 0.14);
+      --text: #eef2ff;
+      --muted: #9aa4bf;
+      --accent: #f97316;
+      --accent-2: #22c55e;
+      --danger: #fb7185;
+      --shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+      --radius: 22px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(249, 115, 22, 0.24), transparent 34rem),
+        radial-gradient(circle at top right, rgba(34, 197, 94, 0.16), transparent 30rem),
+        linear-gradient(135deg, #080b16 0%, #10162a 52%, #08111c 100%);
+    }
+
+    a {
+      color: inherit;
+    }
+
+    .page {
+      width: min(1240px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 28px 0 56px;
+    }
+
+    .nav {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 34px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+    }
+
+    .brand-mark {
+      width: 44px;
+      height: 44px;
+      border-radius: 15px;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, #f97316, #facc15);
+      color: #171717;
+      box-shadow: 0 12px 40px rgba(249, 115, 22, 0.3);
+      font-size: 22px;
+    }
+
+    .nav-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .pill-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 14px;
+      transition: 0.2s ease;
+    }
+
+    .pill-link:hover {
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.12);
+      transform: translateY(-1px);
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(340px, 0.95fr);
+      gap: 24px;
+      align-items: stretch;
+    }
+
+    .hero-card,
+    .panel {
+      border: 1px solid var(--border);
+      background: linear-gradient(180deg, rgba(255,255,255,0.11), rgba(255,255,255,0.06));
+      backdrop-filter: blur(18px);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .hero-card {
+      padding: 34px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero-card::after {
+      content: "";
+      position: absolute;
+      right: -80px;
+      bottom: -80px;
+      width: 260px;
+      height: 260px;
+      border-radius: 999px;
+      background: rgba(249, 115, 22, 0.12);
+      filter: blur(2px);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border: 1px solid rgba(249, 115, 22, 0.35);
+      border-radius: 999px;
+      color: #fed7aa;
+      background: rgba(249, 115, 22, 0.11);
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 18px;
+    }
+
+    h1 {
+      margin: 0;
+      max-width: 760px;
+      font-size: clamp(38px, 5vw, 70px);
+      line-height: 0.95;
+      letter-spacing: -0.07em;
+    }
+
+    .hero-copy {
+      margin: 22px 0 0;
+      max-width: 720px;
+      color: var(--muted);
+      font-size: 17px;
+      line-height: 1.75;
+    }
+
+    .hero-stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-top: 28px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .stat {
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: rgba(7, 10, 20, 0.38);
+    }
+
+    .stat strong {
+      display: block;
+      font-size: 24px;
+      letter-spacing: -0.04em;
+    }
+
+    .stat span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .panel {
+      padding: 22px;
+    }
+
+    .panel-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+
+    .panel-title h2 {
+      margin: 0;
+      font-size: 20px;
+      letter-spacing: -0.04em;
+    }
+
+    .panel-title p {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    form {
+      display: grid;
+      gap: 16px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 8px;
+      color: #dbe3ff;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    input,
+    textarea {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: rgba(5, 9, 20, 0.66);
+      color: var(--text);
+      padding: 13px 14px;
+      outline: none;
+      font: inherit;
+      transition: 0.2s ease;
+    }
+
+    textarea {
+      min-height: 116px;
+      resize: vertical;
+    }
+
+    input:focus,
+    textarea:focus {
+      border-color: rgba(249, 115, 22, 0.7);
+      box-shadow: 0 0 0 4px rgba(249, 115, 22, 0.11);
+    }
+
+    .hint {
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .toggles {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .toggle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.055);
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .toggle span {
+      color: #dbe3ff;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .toggle input {
+      width: 42px;
+      height: 24px;
+      appearance: none;
+      padding: 0;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.35);
+      position: relative;
+      cursor: pointer;
+    }
+
+    .toggle input::after {
+      content: "";
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      background: white;
+      transition: 0.2s ease;
+    }
+
+    .toggle input:checked {
+      background: linear-gradient(135deg, var(--accent), #facc15);
+    }
+
+    .toggle input:checked::after {
+      transform: translateX(18px);
+    }
+
+    .term-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .chip {
+      border: 1px solid rgba(255,255,255,0.13);
+      background: rgba(255,255,255,0.07);
+      color: #dbe3ff;
+      border-radius: 999px;
+      padding: 7px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .chip:hover {
+      background: rgba(255,255,255,0.13);
+    }
+
+    .button-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
+
+    button {
+      border: 0;
+      border-radius: 15px;
+      padding: 13px 17px;
+      font: inherit;
+      font-weight: 800;
+      cursor: pointer;
+      transition: 0.2s ease;
+    }
+
+    .primary-btn {
+      flex: 1;
+      min-width: 190px;
+      color: #18181b;
+      background: linear-gradient(135deg, #f97316, #facc15);
+      box-shadow: 0 16px 36px rgba(249, 115, 22, 0.28);
+    }
+
+    .secondary-btn {
+      color: var(--text);
+      background: rgba(255,255,255,0.09);
+      border: 1px solid var(--border);
+    }
+
+    button:hover:not(:disabled) {
+      transform: translateY(-1px);
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.68;
+    }
+
+    .results {
+      margin-top: 24px;
+      display: grid;
+      gap: 18px;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .summary-card {
+      padding: 18px;
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      background: rgba(255,255,255,0.07);
+    }
+
+    .summary-card span {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .summary-card strong {
+      display: block;
+      margin-top: 6px;
+      font-size: 30px;
+      letter-spacing: -0.05em;
+    }
+
+    .table-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+
+    .table-head h2 {
+      margin: 0;
+      font-size: 20px;
+      letter-spacing: -0.04em;
+    }
+
+    .table-tools {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .search-input {
+      width: min(310px, 100%);
+    }
+
+    .table-wrap {
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+    }
+
+    table {
+      width: 100%;
+      min-width: 980px;
+      border-collapse: collapse;
+      background: rgba(4, 8, 18, 0.45);
+    }
+
+    th,
+    td {
+      padding: 14px 15px;
+      text-align: left;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      vertical-align: top;
+      font-size: 14px;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: #111729;
+      color: #cbd5e1;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    td {
+      color: #e5e7eb;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .name-cell {
+      font-weight: 800;
+      color: #fff7ed;
+    }
+
+    .link-btn {
+      display: inline-flex;
+      margin-right: 8px;
+      margin-bottom: 6px;
+      color: #fed7aa;
+      text-decoration: none;
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .empty-state,
+    .error-box {
+      padding: 24px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.06);
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .error-box {
+      display: none;
+      border-color: rgba(251, 113, 133, 0.45);
+      background: rgba(251, 113, 133, 0.1);
+      color: #fecdd3;
+    }
+
+    .loader {
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      border: 3px solid rgba(0,0,0,0.18);
+      border-top-color: #18181b;
+      display: none;
+      animation: spin 0.8s linear infinite;
+    }
+
+    .loading .loader {
+      display: inline-block;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    @media (max-width: 900px) {
+      .hero {
+        grid-template-columns: 1fr;
+      }
+
+      .hero-stats,
+      .summary-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .page {
+        width: min(100% - 22px, 1240px);
+        padding-top: 18px;
+      }
+
+      .nav {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .hero-card,
+      .panel {
+        padding: 20px;
+      }
+
+      .grid-2,
+      .toggles {
+        grid-template-columns: 1fr;
+      }
+
+      h1 {
+        font-size: 39px;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <main class="page">
+    <nav class="nav">
+      <div class="brand">
+        <div class="brand-mark">🍽️</div>
+        <div>
+          <div>Catering Lead Agent</div>
+          <div class="muted" style="font-size: 13px; font-weight: 600; letter-spacing: 0;">
+            Google Places lead generation
+          </div>
+        </div>
+      </div>
+
+      <div class="nav-actions">
+        <a class="pill-link" href="/docs" target="_blank">API Docs</a>
+        <a class="pill-link" href="/health" target="_blank">Health Check</a>
+      </div>
+    </nav>
+
+    <section class="hero">
+      <div class="hero-card">
+        <div class="eyebrow">Live scraper dashboard</div>
+
+        <h1>Find catering leads without touching Swagger.</h1>
+
+        <p class="hero-copy">
+          Search businesses by location and category, filter for phone/email quality,
+          optionally keep results within a local radius, then push valid leads to n8n.
+        </p>
+
+        <div class="hero-stats">
+          <div class="stat">
+            <strong>Email</strong>
+            <span>quality filter</span>
+          </div>
+
+          <div class="stat">
+            <strong>Radius</strong>
+            <span>local targeting</span>
+          </div>
+
+          <div class="stat">
+            <strong>n8n</strong>
+            <span>automation ready</span>
+          </div>
+        </div>
+      </div>
+
+      <aside class="panel">
+        <div class="panel-title">
+          <div>
+            <h2>Generate leads</h2>
+            <p>Use comma-separated or line-separated search terms.</p>
+          </div>
+        </div>
+
+        <form id="leadForm">
+          <div>
+            <label for="location">Target location</label>
+            <input id="location" name="location" placeholder="Example: London, UK" required />
+          </div>
+
+          <div>
+            <label for="searchTerms">Business search terms</label>
+            <textarea id="searchTerms" name="searchTerms" required>catering companies
+corporate catering
+event catering
+wedding catering</textarea>
+
+            <div class="term-chips">
+              <button type="button" class="chip" data-term="restaurants">restaurants</button>
+              <button type="button" class="chip" data-term="event venues">event venues</button>
+              <button type="button" class="chip" data-term="wedding venues">wedding venues</button>
+              <button type="button" class="chip" data-term="hotels">hotels</button>
+            </div>
+          </div>
+
+          <div class="grid-2">
+            <div>
+              <label for="maxResults">Results per term</label>
+              <input id="maxResults" type="number" min="1" max="500" value="20" />
+            </div>
+
+            <div>
+              <label for="maxLeads">Lead enrichments/place</label>
+              <input id="maxLeads" type="number" min="0" max="10" value="1" />
+            </div>
+          </div>
+
+          <div class="grid-2">
+            <div>
+              <label for="radius">Radius miles</label>
+              <input id="radius" type="number" min="1" step="0.5" value="10" />
+            </div>
+
+            <div>
+              <label for="referenceLat">Reference latitude</label>
+              <input id="referenceLat" type="number" step="any" placeholder="Optional" />
+            </div>
+          </div>
+
+          <div>
+            <label for="referenceLng">Reference longitude</label>
+            <input id="referenceLng" type="number" step="any" placeholder="Optional" />
+
+            <div class="hint">
+              Radius filtering only works when both latitude and longitude are provided.
+            </div>
+          </div>
+
+          <div class="toggles">
+            <label class="toggle">
+              <span>Require email</span>
+              <input id="requireEmail" type="checkbox" checked />
+            </label>
+
+            <label class="toggle">
+              <span>Require phone</span>
+              <input id="requirePhone" type="checkbox" checked />
+            </label>
+
+            <label class="toggle">
+              <span>Scrape contacts</span>
+              <input id="scrapeContacts" type="checkbox" checked />
+            </label>
+
+            <label class="toggle">
+              <span>Send to n8n</span>
+              <input id="sendN8n" type="checkbox" checked />
+            </label>
+          </div>
+
+          <div class="button-row">
+            <button id="submitBtn" class="primary-btn" type="submit">
+              <span class="loader"></span>
+              <span id="submitText">Generate leads</span>
+            </button>
+
+            <button id="resetBtn" class="secondary-btn" type="button">
+              Reset
+            </button>
+          </div>
+        </form>
+      </aside>
+    </section>
+
+    <section class="results">
+      <div id="errorBox" class="error-box"></div>
+
+      <div class="summary-grid">
+        <div class="summary-card">
+          <span>Raw results</span>
+          <strong id="rawCount">0</strong>
+        </div>
+
+        <div class="summary-card">
+          <span>Valid leads</span>
+          <strong id="validCount">0</strong>
+        </div>
+
+        <div class="summary-card">
+          <span>Sent to n8n</span>
+          <strong id="sentCount">0</strong>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="table-head">
+          <div>
+            <h2>Lead results</h2>
+            <p class="muted" style="margin: 6px 0 0;">
+              Filter, export, and open websites directly from here.
+            </p>
+          </div>
+
+          <div class="table-tools">
+            <input id="filterInput" class="search-input" placeholder="Filter results..." />
+            <button id="exportBtn" class="secondary-btn" type="button">
+              Export CSV
+            </button>
+          </div>
+        </div>
+
+        <div id="emptyState" class="empty-state">
+          No leads generated yet. Fill out the form and run a search.
+        </div>
+
+        <div id="tableWrap" class="table-wrap" style="display:none;">
+          <table>
+            <thead>
+              <tr>
+                <th>Business</th>
+                <th>Contact</th>
+                <th>Category</th>
+                <th>Address</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+
+            <tbody id="leadRows"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const form = document.getElementById("leadForm");
+    const submitBtn = document.getElementById("submitBtn");
+    const submitText = document.getElementById("submitText");
+    const errorBox = document.getElementById("errorBox");
+    const leadRows = document.getElementById("leadRows");
+    const emptyState = document.getElementById("emptyState");
+    const tableWrap = document.getElementById("tableWrap");
+    const filterInput = document.getElementById("filterInput");
+    const exportBtn = document.getElementById("exportBtn");
+
+    let currentLeads = [];
+
+    function parseTerms(value) {
+      return value
+        .split(/[\n,]+/)
+        .map(term => term.trim())
+        .filter(Boolean);
+    }
+
+    function safeText(value) {
+      return value === null || value === undefined || value === "" ? "—" : String(value);
+    }
+
+    function safeUrl(url) {
+      if (!url) return null;
+
+      const value = String(url);
+
+      if (value.startsWith("http://") || value.startsWith("https://")) {
+        return value;
+      }
+
+      return `https://${value}`;
+    }
+
+    function setLoading(isLoading) {
+      submitBtn.disabled = isLoading;
+      submitBtn.classList.toggle("loading", isLoading);
+      submitText.textContent = isLoading ? "Generating..." : "Generate leads";
+    }
+
+    function showError(message) {
+      errorBox.textContent = message;
+      errorBox.style.display = "block";
+    }
+
+    function hideError() {
+      errorBox.textContent = "";
+      errorBox.style.display = "none";
+    }
+
+    function renderSummary(data) {
+      document.getElementById("rawCount").textContent = data.total_raw_results ?? 0;
+      document.getElementById("validCount").textContent = data.total_valid_leads ?? 0;
+      document.getElementById("sentCount").textContent = data.total_sent_to_n8n ?? 0;
+    }
+
+    function renderLeads(leads) {
+      const query = filterInput.value.trim().toLowerCase();
+
+      const filtered = query
+        ? leads.filter(lead => JSON.stringify(lead).toLowerCase().includes(query))
+        : leads;
+
+      leadRows.innerHTML = "";
+
+      emptyState.style.display = filtered.length ? "none" : "block";
+      tableWrap.style.display = filtered.length ? "block" : "none";
+
+      filtered.forEach(lead => {
+        const website = safeUrl(lead.website);
+        const maps = safeUrl(lead.google_maps_url);
+
+        const tr = document.createElement("tr");
+
+        tr.innerHTML = `
+          <td class="name-cell">${safeText(lead.business_name)}</td>
+
+          <td>
+            <div>${safeText(lead.phone)}</div>
+            <div class="muted">${safeText(lead.email)}</div>
+          </td>
+
+          <td>${safeText(lead.category)}</td>
+
+          <td>${safeText(lead.address)}</td>
+
+          <td>
+            ${website ? `<a class="link-btn" href="${website}" target="_blank" rel="noreferrer">Website</a>` : ""}
+            ${maps ? `<a class="link-btn" href="${maps}" target="_blank" rel="noreferrer">Maps</a>` : ""}
+          </td>
+        `;
+
+        leadRows.appendChild(tr);
+      });
+    }
+
+    function downloadCsv(leads) {
+      if (!leads.length) {
+        showError("No leads to export yet.");
+        return;
+      }
+
+      const headers = [
+        "business_name",
+        "phone",
+        "email",
+        "website",
+        "address",
+        "category",
+        "google_maps_url",
+        "lat",
+        "lng"
+      ];
+
+      const rows = [headers.join(",")].concat(
+        leads.map(lead => {
+          return headers.map(key => {
+            const value = safeText(lead[key]).replaceAll('"', '""');
+            return `"${value}"`;
+          }).join(",");
+        })
+      );
+
+      const blob = new Blob([rows.join("\n")], {
+        type: "text/csv;charset=utf-8;"
+      });
+
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+
+      link.href = url;
+      link.download = `catering-leads-${new Date().toISOString().slice(0, 10)}.csv`;
+      link.click();
+
+      URL.revokeObjectURL(url);
+    }
+
+    document.querySelectorAll(".chip").forEach(chip => {
+      chip.addEventListener("click", () => {
+        const textarea = document.getElementById("searchTerms");
+        const terms = parseTerms(textarea.value);
+        const next = chip.dataset.term;
+
+        if (!terms.includes(next)) {
+          terms.push(next);
+        }
+
+        textarea.value = terms.join("\n");
+      });
+    });
+
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      hideError();
+
+      const terms = parseTerms(document.getElementById("searchTerms").value);
+
+      if (!terms.length) {
+        showError("Add at least one search term.");
+        return;
+      }
+
+      const referenceLat = document.getElementById("referenceLat").value;
+      const referenceLng = document.getElementById("referenceLng").value;
+
+      const payload = {
+        location: document.getElementById("location").value.trim(),
+        search_terms: terms,
+        max_results_per_search: Number(document.getElementById("maxResults").value || 20),
+        require_email: document.getElementById("requireEmail").checked,
+        require_phone: document.getElementById("requirePhone").checked,
+        send_to_n8n: document.getElementById("sendN8n").checked,
+        scrape_contacts: document.getElementById("scrapeContacts").checked,
+        max_leads_per_place: Number(document.getElementById("maxLeads").value || 1),
+        radius_miles: Number(document.getElementById("radius").value || 10),
+        reference_lat: referenceLat ? Number(referenceLat) : null,
+        reference_lng: referenceLng ? Number(referenceLng) : null
+      };
+
+      try {
+        setLoading(true);
+
+        const response = await fetch("/api/leads/generate", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.detail || "Lead generation failed.");
+        }
+
+        currentLeads = data.leads || [];
+
+        renderSummary(data);
+        renderLeads(currentLeads);
+
+      } catch (error) {
+        showError(error.message || "Something went wrong.");
+      } finally {
+        setLoading(false);
+      }
+    });
+
+    filterInput.addEventListener("input", () => {
+      renderLeads(currentLeads);
+    });
+
+    exportBtn.addEventListener("click", () => {
+      downloadCsv(currentLeads);
+    });
+
+    document.getElementById("resetBtn").addEventListener("click", () => {
+      form.reset();
+
+      document.getElementById("searchTerms").value =
+        "catering companies\ncorporate catering\nevent catering\nwedding catering";
+
+      currentLeads = [];
+      filterInput.value = "";
+
+      renderSummary({
+        total_raw_results: 0,
+        total_valid_leads: 0,
+        total_sent_to_n8n: 0
+      });
+
+      renderLeads([]);
+      hideError();
+    });
+  </script>
+</body>
+</html>
