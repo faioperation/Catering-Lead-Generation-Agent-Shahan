@@ -1,0 +1,2165 @@
+diff --git a/app/auth.py b/app/auth.py
+new file mode 100644
+index 0000000..b5f35c2
+--- /dev/null
++++ b/app/auth.py
+@@ -0,0 +1,16 @@
++from fastapi import Header, HTTPException
++from app.config import settings
++
++
++async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
++    """
++    Lightweight access control.
++    If API_KEY is empty in .env, local development remains open.
++    If API_KEY is set, all protected endpoints require X-API-Key.
++    """
++
++    if not settings.API_KEY:
++        return
++
++    if x_api_key != settings.API_KEY:
++        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+diff --git a/app/config.py b/app/config.py
+index 0485c98..4aad66e 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -1,10 +1,18 @@
++from typing import Optional
+ from pydantic_settings import BaseSettings
+ 
+ 
+ class Settings(BaseSettings):
+     APIFY_TOKEN: str
+     APIFY_ACTOR_ID: str = "compass~crawler-google-places"
+-    N8N_WEBHOOK_URL: str
++    N8N_WEBHOOK_URL: str = ""
++
++    DATABASE_URL: str = "sqlite:///./data/catering_outreach.db"
++    API_KEY: Optional[str] = None
++
++    SENDGRID_API_KEY: Optional[str] = None
++    SENDGRID_FROM_EMAIL: Optional[str] = None
++    SENDGRID_FROM_NAME: str = "Catering Outreach Team"
+ 
+     APP_ENV: str = "development"
+ 
+@@ -13,4 +21,4 @@ class Settings(BaseSettings):
+         extra = "ignore"
+ 
+ 
+-settings = Settings()
+\ No newline at end of file
++settings = Settings()
+diff --git a/app/database.py b/app/database.py
+new file mode 100644
+index 0000000..cb64b98
+--- /dev/null
++++ b/app/database.py
+@@ -0,0 +1,507 @@
++from __future__ import annotations
++
++from datetime import datetime, timezone
++from pathlib import Path
++from typing import Any, Dict, Iterable, List, Optional, Sequence
++import json
++import sqlite3
++import uuid
++
++from app.config import settings
++
++
++DB_PATH = Path(settings.DATABASE_URL.replace("sqlite:///", "")) if settings.DATABASE_URL.startswith("sqlite:///") else Path(settings.DATABASE_URL)
++
++
++def now_iso() -> str:
++    return datetime.now(timezone.utc).isoformat()
++
++
++def new_id(prefix: str) -> str:
++    return f"{prefix}_{uuid.uuid4().hex[:14]}"
++
++
++def get_connection() -> sqlite3.Connection:
++    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
++    conn = sqlite3.connect(DB_PATH)
++    conn.row_factory = sqlite3.Row
++    return conn
++
++
++def row_to_dict(row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:
++    if row is None:
++        return None
++    return dict(row)
++
++
++def rows_to_dicts(rows: Iterable[sqlite3.Row]) -> List[Dict[str, Any]]:
++    return [dict(row) for row in rows]
++
++
++def init_db() -> None:
++    with get_connection() as conn:
++        conn.executescript(
++            """
++            CREATE TABLE IF NOT EXISTS leads (
++                id TEXT PRIMARY KEY,
++                business_name TEXT,
++                phone TEXT,
++                email TEXT,
++                website TEXT,
++                address TEXT,
++                category TEXT,
++                google_maps_url TEXT,
++                source TEXT DEFAULT 'apify_google_places',
++                lat REAL,
++                lng REAL,
++                score INTEGER DEFAULT 0,
++                qualification_status TEXT DEFAULT 'Review Required',
++                qualification_reason TEXT,
++                email_verification_status TEXT DEFAULT 'missing',
++                email_verification_reason TEXT,
++                raw_json TEXT,
++                created_at TEXT NOT NULL,
++                updated_at TEXT NOT NULL
++            );
++
++            CREATE INDEX IF NOT EXISTS idx_leads_email ON leads(email);
++            CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(qualification_status);
++
++            CREATE TABLE IF NOT EXISTS campaigns (
++                id TEXT PRIMARY KEY,
++                name TEXT NOT NULL,
++                description TEXT,
++                offer TEXT,
++                tone TEXT DEFAULT 'professional',
++                target_audience TEXT,
++                status TEXT DEFAULT 'draft',
++                created_at TEXT NOT NULL,
++                updated_at TEXT NOT NULL
++            );
++
++            CREATE TABLE IF NOT EXISTS campaign_leads (
++                campaign_id TEXT NOT NULL,
++                lead_id TEXT NOT NULL,
++                assigned_at TEXT NOT NULL,
++                PRIMARY KEY (campaign_id, lead_id),
++                FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
++                FOREIGN KEY (lead_id) REFERENCES leads(id) ON DELETE CASCADE
++            );
++
++            CREATE TABLE IF NOT EXISTS outreach_messages (
++                id TEXT PRIMARY KEY,
++                campaign_id TEXT NOT NULL,
++                lead_id TEXT NOT NULL,
++                subject TEXT NOT NULL,
++                body TEXT NOT NULL,
++                status TEXT DEFAULT 'review_required',
++                delivery_status TEXT DEFAULT 'not_sent',
++                provider_message_id TEXT,
++                created_at TEXT NOT NULL,
++                updated_at TEXT NOT NULL,
++                approved_at TEXT,
++                sent_at TEXT,
++                last_event_at TEXT,
++                FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
++                FOREIGN KEY (lead_id) REFERENCES leads(id) ON DELETE CASCADE
++            );
++
++            CREATE INDEX IF NOT EXISTS idx_outreach_status ON outreach_messages(status);
++            CREATE INDEX IF NOT EXISTS idx_outreach_campaign ON outreach_messages(campaign_id);
++            CREATE UNIQUE INDEX IF NOT EXISTS idx_outreach_unique_draft
++            ON outreach_messages(campaign_id, lead_id);
++            """
++        )
++        conn.commit()
++
++
++def upsert_lead(lead: Dict[str, Any], raw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
++    timestamp = now_iso()
++
++    with get_connection() as conn:
++        existing = None
++
++        if lead.get("email"):
++            existing = conn.execute(
++                "SELECT * FROM leads WHERE lower(email) = lower(?) LIMIT 1",
++                (lead.get("email"),),
++            ).fetchone()
++
++        if existing is None and lead.get("phone"):
++            existing = conn.execute(
++                "SELECT * FROM leads WHERE phone = ? LIMIT 1",
++                (lead.get("phone"),),
++            ).fetchone()
++
++        if existing is None and lead.get("business_name") and lead.get("address"):
++            existing = conn.execute(
++                """
++                SELECT * FROM leads
++                WHERE lower(business_name) = lower(?) AND lower(address) = lower(?)
++                LIMIT 1
++                """,
++                (lead.get("business_name"), lead.get("address")),
++            ).fetchone()
++
++        lead_id = existing["id"] if existing else new_id("lead")
++        created_at = existing["created_at"] if existing else timestamp
++
++        data = {
++            "id": lead_id,
++            "business_name": lead.get("business_name"),
++            "phone": lead.get("phone"),
++            "email": lead.get("email"),
++            "website": lead.get("website"),
++            "address": lead.get("address"),
++            "category": lead.get("category"),
++            "google_maps_url": lead.get("google_maps_url"),
++            "source": lead.get("source", "apify_google_places"),
++            "lat": lead.get("lat"),
++            "lng": lead.get("lng"),
++            "score": lead.get("score", 0),
++            "qualification_status": lead.get("qualification_status", "Review Required"),
++            "qualification_reason": lead.get("qualification_reason"),
++            "email_verification_status": lead.get("email_verification_status", "missing"),
++            "email_verification_reason": lead.get("email_verification_reason"),
++            "raw_json": json.dumps(raw or lead, ensure_ascii=False),
++            "created_at": created_at,
++            "updated_at": timestamp,
++        }
++
++        conn.execute(
++            """
++            INSERT INTO leads (
++                id, business_name, phone, email, website, address, category,
++                google_maps_url, source, lat, lng, score, qualification_status,
++                qualification_reason, email_verification_status,
++                email_verification_reason, raw_json, created_at, updated_at
++            ) VALUES (
++                :id, :business_name, :phone, :email, :website, :address, :category,
++                :google_maps_url, :source, :lat, :lng, :score, :qualification_status,
++                :qualification_reason, :email_verification_status,
++                :email_verification_reason, :raw_json, :created_at, :updated_at
++            )
++            ON CONFLICT(id) DO UPDATE SET
++                business_name=excluded.business_name,
++                phone=excluded.phone,
++                email=excluded.email,
++                website=excluded.website,
++                address=excluded.address,
++                category=excluded.category,
++                google_maps_url=excluded.google_maps_url,
++                source=excluded.source,
++                lat=excluded.lat,
++                lng=excluded.lng,
++                score=excluded.score,
++                qualification_status=excluded.qualification_status,
++                qualification_reason=excluded.qualification_reason,
++                email_verification_status=excluded.email_verification_status,
++                email_verification_reason=excluded.email_verification_reason,
++                raw_json=excluded.raw_json,
++                updated_at=excluded.updated_at
++            """,
++            data,
++        )
++        conn.commit()
++
++        return get_lead(lead_id)  # type: ignore[return-value]
++
++
++def list_leads(status: Optional[str] = None, limit: int = 200) -> List[Dict[str, Any]]:
++    with get_connection() as conn:
++        if status:
++            rows = conn.execute(
++                "SELECT * FROM leads WHERE qualification_status = ? ORDER BY updated_at DESC LIMIT ?",
++                (status, limit),
++            ).fetchall()
++        else:
++            rows = conn.execute(
++                "SELECT * FROM leads ORDER BY updated_at DESC LIMIT ?",
++                (limit,),
++            ).fetchall()
++    return rows_to_dicts(rows)
++
++
++def get_lead(lead_id: str) -> Optional[Dict[str, Any]]:
++    with get_connection() as conn:
++        row = conn.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
++    return row_to_dict(row)
++
++
++def create_campaign(data: Dict[str, Any]) -> Dict[str, Any]:
++    timestamp = now_iso()
++    campaign_id = new_id("camp")
++    payload = {
++        "id": campaign_id,
++        "name": data["name"],
++        "description": data.get("description"),
++        "offer": data.get("offer"),
++        "tone": data.get("tone", "professional"),
++        "target_audience": data.get("target_audience"),
++        "status": data.get("status", "active"),
++        "created_at": timestamp,
++        "updated_at": timestamp,
++    }
++
++    with get_connection() as conn:
++        conn.execute(
++            """
++            INSERT INTO campaigns (
++                id, name, description, offer, tone, target_audience, status, created_at, updated_at
++            ) VALUES (
++                :id, :name, :description, :offer, :tone, :target_audience, :status, :created_at, :updated_at
++            )
++            """,
++            payload,
++        )
++        conn.commit()
++
++    return get_campaign(campaign_id)  # type: ignore[return-value]
++
++
++def list_campaigns() -> List[Dict[str, Any]]:
++    with get_connection() as conn:
++        rows = conn.execute(
++            """
++            SELECT c.*,
++                   COUNT(DISTINCT cl.lead_id) AS assigned_leads,
++                   COUNT(DISTINCT om.id) AS outreach_messages
++            FROM campaigns c
++            LEFT JOIN campaign_leads cl ON cl.campaign_id = c.id
++            LEFT JOIN outreach_messages om ON om.campaign_id = c.id
++            GROUP BY c.id
++            ORDER BY c.created_at DESC
++            """
++        ).fetchall()
++    return rows_to_dicts(rows)
++
++
++def get_campaign(campaign_id: str) -> Optional[Dict[str, Any]]:
++    with get_connection() as conn:
++        row = conn.execute(
++            """
++            SELECT c.*,
++                   COUNT(DISTINCT cl.lead_id) AS assigned_leads,
++                   COUNT(DISTINCT om.id) AS outreach_messages
++            FROM campaigns c
++            LEFT JOIN campaign_leads cl ON cl.campaign_id = c.id
++            LEFT JOIN outreach_messages om ON om.campaign_id = c.id
++            WHERE c.id = ?
++            GROUP BY c.id
++            """,
++            (campaign_id,),
++        ).fetchone()
++    return row_to_dict(row)
++
++
++def update_campaign(campaign_id: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
++    allowed = ["name", "description", "offer", "tone", "target_audience", "status"]
++    updates = {key: value for key, value in data.items() if key in allowed and value is not None}
++
++    if not updates:
++        return get_campaign(campaign_id)
++
++    updates["updated_at"] = now_iso()
++    assignments = ", ".join([f"{key} = :{key}" for key in updates])
++    updates["id"] = campaign_id
++
++    with get_connection() as conn:
++        conn.execute(f"UPDATE campaigns SET {assignments} WHERE id = :id", updates)
++        conn.commit()
++
++    return get_campaign(campaign_id)
++
++
++def assign_leads_to_campaign(campaign_id: str, lead_ids: Sequence[str]) -> List[str]:
++    timestamp = now_iso()
++    assigned: List[str] = []
++
++    with get_connection() as conn:
++        for lead_id in lead_ids:
++            lead = conn.execute("SELECT id FROM leads WHERE id = ?", (lead_id,)).fetchone()
++            if not lead:
++                continue
++
++            conn.execute(
++                """
++                INSERT OR IGNORE INTO campaign_leads (campaign_id, lead_id, assigned_at)
++                VALUES (?, ?, ?)
++                """,
++                (campaign_id, lead_id, timestamp),
++            )
++            assigned.append(lead_id)
++
++        conn.commit()
++
++    return assigned
++
++
++def get_campaign_assigned_leads(campaign_id: str) -> List[Dict[str, Any]]:
++    with get_connection() as conn:
++        rows = conn.execute(
++            """
++            SELECT l.*
++            FROM leads l
++            INNER JOIN campaign_leads cl ON cl.lead_id = l.id
++            WHERE cl.campaign_id = ?
++            ORDER BY cl.assigned_at DESC
++            """,
++            (campaign_id,),
++        ).fetchall()
++    return rows_to_dicts(rows)
++
++
++def create_or_update_outreach_message(
++    campaign_id: str,
++    lead_id: str,
++    subject: str,
++    body: str,
++    status: str = "review_required",
++) -> Dict[str, Any]:
++    timestamp = now_iso()
++
++    with get_connection() as conn:
++        existing = conn.execute(
++            "SELECT id, status FROM outreach_messages WHERE campaign_id = ? AND lead_id = ?",
++            (campaign_id, lead_id),
++        ).fetchone()
++
++        if existing:
++            message_id = existing["id"]
++            if existing["status"] not in {"sent", "approved"}:
++                conn.execute(
++                    """
++                    UPDATE outreach_messages
++                    SET subject = ?, body = ?, status = ?, updated_at = ?
++                    WHERE id = ?
++                    """,
++                    (subject, body, status, timestamp, message_id),
++                )
++        else:
++            message_id = new_id("msg")
++            conn.execute(
++                """
++                INSERT INTO outreach_messages (
++                    id, campaign_id, lead_id, subject, body, status,
++                    delivery_status, created_at, updated_at
++                ) VALUES (?, ?, ?, ?, ?, ?, 'not_sent', ?, ?)
++                """,
++                (message_id, campaign_id, lead_id, subject, body, status, timestamp, timestamp),
++            )
++
++        conn.commit()
++
++    return get_outreach_message(message_id)  # type: ignore[return-value]
++
++
++def list_outreach_messages(status: Optional[str] = None, campaign_id: Optional[str] = None) -> List[Dict[str, Any]]:
++    clauses = []
++    params: List[Any] = []
++
++    if status:
++        clauses.append("om.status = ?")
++        params.append(status)
++
++    if campaign_id:
++        clauses.append("om.campaign_id = ?")
++        params.append(campaign_id)
++
++    where_sql = "WHERE " + " AND ".join(clauses) if clauses else ""
++
++    with get_connection() as conn:
++        rows = conn.execute(
++            f"""
++            SELECT om.*,
++                   l.business_name,
++                   l.email,
++                   l.phone,
++                   l.website,
++                   l.address,
++                   l.score,
++                   l.qualification_status,
++                   c.name AS campaign_name
++            FROM outreach_messages om
++            INNER JOIN leads l ON l.id = om.lead_id
++            INNER JOIN campaigns c ON c.id = om.campaign_id
++            {where_sql}
++            ORDER BY om.updated_at DESC
++            """,
++            params,
++        ).fetchall()
++    return rows_to_dicts(rows)
++
++
++def get_outreach_message(message_id: str) -> Optional[Dict[str, Any]]:
++    with get_connection() as conn:
++        row = conn.execute(
++            """
++            SELECT om.*,
++                   l.business_name,
++                   l.email,
++                   l.phone,
++                   l.website,
++                   l.address,
++                   l.score,
++                   l.qualification_status,
++                   c.name AS campaign_name
++            FROM outreach_messages om
++            INNER JOIN leads l ON l.id = om.lead_id
++            INNER JOIN campaigns c ON c.id = om.campaign_id
++            WHERE om.id = ?
++            """,
++            (message_id,),
++        ).fetchone()
++    return row_to_dict(row)
++
++
++def update_outreach_message(message_id: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
++    allowed = ["subject", "body", "status", "delivery_status", "provider_message_id", "sent_at", "approved_at", "last_event_at"]
++    updates = {key: value for key, value in data.items() if key in allowed and value is not None}
++
++    if not updates:
++        return get_outreach_message(message_id)
++
++    updates["updated_at"] = now_iso()
++    assignments = ", ".join([f"{key} = :{key}" for key in updates])
++    updates["id"] = message_id
++
++    with get_connection() as conn:
++        conn.execute(f"UPDATE outreach_messages SET {assignments} WHERE id = :id", updates)
++        conn.commit()
++
++    return get_outreach_message(message_id)
++
++
++def dashboard_summary() -> Dict[str, Any]:
++    with get_connection() as conn:
++        lead_counts = rows_to_dicts(
++            conn.execute(
++                "SELECT qualification_status AS status, COUNT(*) AS total FROM leads GROUP BY qualification_status"
++            ).fetchall()
++        )
++        outreach_counts = rows_to_dicts(
++            conn.execute(
++                "SELECT status, COUNT(*) AS total FROM outreach_messages GROUP BY status"
++            ).fetchall()
++        )
++        delivery_counts = rows_to_dicts(
++            conn.execute(
++                "SELECT delivery_status AS status, COUNT(*) AS total FROM outreach_messages GROUP BY delivery_status"
++            ).fetchall()
++        )
++        totals = conn.execute(
++            """
++            SELECT
++              (SELECT COUNT(*) FROM leads) AS total_leads,
++              (SELECT COUNT(*) FROM campaigns) AS total_campaigns,
++              (SELECT COUNT(*) FROM campaign_leads) AS assigned_leads,
++              (SELECT COUNT(*) FROM outreach_messages) AS outreach_messages
++            """
++        ).fetchone()
++
++    return {
++        "totals": row_to_dict(totals),
++        "lead_counts": lead_counts,
++        "outreach_counts": outreach_counts,
++        "delivery_counts": delivery_counts,
++    }
+diff --git a/app/email_service.py b/app/email_service.py
+new file mode 100644
+index 0000000..6c8f477
+--- /dev/null
++++ b/app/email_service.py
+@@ -0,0 +1,55 @@
++from typing import Any, Dict
++import httpx
++
++from app.config import settings
++
++
++class EmailService:
++    def __init__(self):
++        self.api_key = settings.SENDGRID_API_KEY
++        self.from_email = settings.SENDGRID_FROM_EMAIL
++        self.from_name = settings.SENDGRID_FROM_NAME
++        self.base_url = "https://api.sendgrid.com/v3"
++
++    def is_configured(self) -> bool:
++        return bool(self.api_key and self.from_email)
++
++    async def send_outreach(self, message: Dict[str, Any]) -> Dict[str, Any]:
++        if not self.is_configured():
++            raise Exception("SendGrid is not configured. Add SENDGRID_API_KEY and SENDGRID_FROM_EMAIL to .env")
++
++        if not message.get("email"):
++            raise Exception("Cannot send outreach because this lead has no email address.")
++
++        payload = {
++            "personalizations": [
++                {
++                    "to": [{"email": message["email"], "name": message.get("business_name") or ""}],
++                    "subject": message["subject"],
++                }
++            ],
++            "from": {"email": self.from_email, "name": self.from_name},
++            "content": [{"type": "text/plain", "value": message["body"]}],
++            "custom_args": {
++                "outreach_message_id": message["id"],
++                "campaign_id": message["campaign_id"],
++                "lead_id": message["lead_id"],
++            },
++        }
++
++        headers = {
++            "Authorization": f"Bearer {self.api_key}",
++            "Content-Type": "application/json",
++        }
++
++        async with httpx.AsyncClient(timeout=30.0) as client:
++            response = await client.post(f"{self.base_url}/mail/send", headers=headers, json=payload)
++
++        if response.status_code >= 400:
++            raise Exception(f"SendGrid error {response.status_code}: {response.text}")
++
++        return {
++            "provider": "sendgrid",
++            "status_code": response.status_code,
++            "provider_message_id": response.headers.get("x-message-id"),
++        }
+diff --git a/app/frontend/index.html b/app/frontend/index.html
+new file mode 100644
+index 0000000..18f98ba
+--- /dev/null
++++ b/app/frontend/index.html
+@@ -0,0 +1,610 @@
++<!doctype html>
++<html lang="en">
++<head>
++  <meta charset="utf-8" />
++  <meta name="viewport" content="width=device-width, initial-scale=1" />
++  <title>Catering Outreach Platform</title>
++  <style>
++    :root {
++      --bg: #07111f;
++      --panel: rgba(255,255,255,.075);
++      --panel2: rgba(255,255,255,.115);
++      --line: rgba(255,255,255,.14);
++      --text: #ecf3ff;
++      --muted: #96a3ba;
++      --accent: #fb923c;
++      --green: #22c55e;
++      --red: #fb7185;
++      --yellow: #facc15;
++      --blue: #38bdf8;
++      --radius: 22px;
++      --shadow: 0 28px 90px rgba(0,0,0,.36);
++    }
++    * { box-sizing: border-box; }
++    body {
++      margin: 0;
++      min-height: 100vh;
++      color: var(--text);
++      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++      background:
++        radial-gradient(circle at 8% 0%, rgba(251,146,60,.26), transparent 28rem),
++        radial-gradient(circle at 92% 6%, rgba(56,189,248,.18), transparent 32rem),
++        linear-gradient(135deg, #050914, #0b1426 48%, #071b24);
++    }
++    a { color: inherit; }
++    .page { width: min(1420px, calc(100% - 28px)); margin: 0 auto; padding: 24px 0 56px; }
++    .topbar { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 22px; }
++    .brand { display: flex; gap: 12px; align-items: center; }
++    .logo { width: 48px; height: 48px; border-radius: 16px; display: grid; place-items: center; font-size: 22px; background: linear-gradient(135deg, var(--accent), var(--yellow)); color: #141414; box-shadow: 0 16px 44px rgba(251,146,60,.26); }
++    .brand h1 { font-size: 20px; margin: 0; letter-spacing: -.04em; }
++    .brand p { margin: 3px 0 0; color: var(--muted); font-size: 13px; }
++    .top-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; align-items: center; }
++    .api-key { width: 220px; }
++    input, textarea, select {
++      width: 100%;
++      border: 1px solid var(--line);
++      border-radius: 14px;
++      background: rgba(3,7,18,.62);
++      color: var(--text);
++      padding: 12px 13px;
++      outline: none;
++      font: inherit;
++    }
++    textarea { min-height: 112px; resize: vertical; }
++    input:focus, textarea:focus, select:focus { border-color: rgba(251,146,60,.75); box-shadow: 0 0 0 4px rgba(251,146,60,.12); }
++    button, .link-pill {
++      border: 0;
++      border-radius: 14px;
++      padding: 12px 15px;
++      font-weight: 800;
++      font: inherit;
++      cursor: pointer;
++      transition: .18s ease;
++      text-decoration: none;
++      display: inline-flex;
++      align-items: center;
++      justify-content: center;
++      gap: 8px;
++    }
++    button:hover, .link-pill:hover { transform: translateY(-1px); }
++    button:disabled { opacity: .55; cursor: not-allowed; transform: none; }
++    .btn-primary { background: linear-gradient(135deg, var(--accent), var(--yellow)); color: #141414; box-shadow: 0 16px 38px rgba(251,146,60,.25); }
++    .btn-soft { color: var(--text); background: rgba(255,255,255,.08); border: 1px solid var(--line); }
++    .btn-green { color: #052e16; background: linear-gradient(135deg, #22c55e, #86efac); }
++    .btn-red { color: #fff; background: rgba(251,113,133,.8); }
++    .link-pill { color: var(--muted); background: rgba(255,255,255,.06); border: 1px solid var(--line); font-size: 14px; }
++    .hero { display: grid; grid-template-columns: 1.05fr .95fr; gap: 18px; margin-bottom: 18px; }
++    .card { border: 1px solid var(--line); background: linear-gradient(180deg, rgba(255,255,255,.105), rgba(255,255,255,.055)); border-radius: var(--radius); box-shadow: var(--shadow); backdrop-filter: blur(16px); }
++    .hero-copy { padding: 32px; overflow: hidden; position: relative; }
++    .hero-copy:after { content: ""; position: absolute; width: 260px; height: 260px; border-radius: 999px; right: -90px; bottom: -110px; background: rgba(251,146,60,.13); }
++    .eyebrow { display: inline-flex; padding: 7px 11px; border-radius: 999px; color: #fed7aa; background: rgba(251,146,60,.12); border: 1px solid rgba(251,146,60,.34); font-weight: 800; font-size: 13px; margin-bottom: 18px; }
++    .hero-copy h2 { margin: 0; font-size: clamp(36px, 4vw, 68px); line-height: .96; letter-spacing: -.07em; max-width: 820px; }
++    .hero-copy p { color: var(--muted); font-size: 16px; line-height: 1.7; max-width: 780px; margin: 20px 0 0; }
++    .workflow { display: grid; grid-template-columns: repeat(5, 1fr); gap: 9px; margin-top: 24px; position: relative; z-index: 1; }
++    .flow-step { padding: 13px; border-radius: 17px; border: 1px solid var(--line); background: rgba(4,9,20,.45); }
++    .flow-step strong { display: block; font-size: 13px; }
++    .flow-step span { color: var(--muted); font-size: 12px; }
++    .summary { padding: 18px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
++    .metric { border: 1px solid var(--line); border-radius: 18px; background: rgba(5,9,20,.45); padding: 17px; }
++    .metric span { color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
++    .metric strong { display: block; margin-top: 7px; font-size: 34px; letter-spacing: -.06em; }
++    .tabs { display: flex; gap: 9px; flex-wrap: wrap; margin: 18px 0; }
++    .tab { color: var(--muted); background: rgba(255,255,255,.06); border: 1px solid var(--line); }
++    .tab.active { color: #141414; background: linear-gradient(135deg, var(--accent), var(--yellow)); border-color: transparent; }
++    .grid-main { display: grid; grid-template-columns: 430px minmax(0, 1fr); gap: 18px; }
++    .panel { padding: 20px; }
++    .panel h3 { margin: 0; font-size: 19px; letter-spacing: -.04em; }
++    .panel p { color: var(--muted); line-height: 1.55; font-size: 14px; margin: 7px 0 0; }
++    .form { display: grid; gap: 14px; margin-top: 17px; }
++    label { display: block; color: #dbe7ff; font-size: 13px; font-weight: 800; margin-bottom: 8px; }
++    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
++    .toggles { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
++    .toggle { display: flex; justify-content: space-between; align-items: center; gap: 12px; border: 1px solid var(--line); background: rgba(255,255,255,.055); border-radius: 15px; padding: 11px; margin: 0; }
++    .toggle input { width: 42px; height: 23px; appearance: none; padding: 0; border-radius: 999px; background: rgba(148,163,184,.35); position: relative; }
++    .toggle input:after { content: ""; position: absolute; width: 17px; height: 17px; border-radius: 999px; background: white; top: 2px; left: 3px; transition: .16s ease; }
++    .toggle input:checked { background: linear-gradient(135deg, var(--accent), var(--yellow)); }
++    .toggle input:checked:after { transform: translateX(18px); }
++    .hint { color: var(--muted); font-size: 12px; margin-top: 7px; line-height: 1.45; }
++    .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
++    .toolbar-left, .toolbar-right { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
++    .filter { width: 260px; }
++    .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 18px; background: rgba(5,9,20,.42); }
++    table { width: 100%; min-width: 1050px; border-collapse: collapse; }
++    th, td { padding: 13px 14px; border-bottom: 1px solid rgba(255,255,255,.08); text-align: left; vertical-align: top; font-size: 14px; }
++    th { position: sticky; top: 0; background: #111a2d; color: #cbd5e1; text-transform: uppercase; letter-spacing: .07em; font-size: 11px; z-index: 1; }
++    .muted { color: var(--muted); }
++    .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 5px 9px; font-size: 12px; font-weight: 800; border: 1px solid var(--line); }
++    .b-qualified { color: #bbf7d0; background: rgba(34,197,94,.13); border-color: rgba(34,197,94,.32); }
++    .b-review { color: #fef08a; background: rgba(250,204,21,.12); border-color: rgba(250,204,21,.32); }
++    .b-rejected { color: #fecdd3; background: rgba(251,113,133,.12); border-color: rgba(251,113,133,.32); }
++    .b-draft { color: #bae6fd; background: rgba(56,189,248,.12); border-color: rgba(56,189,248,.3); }
++    .b-sent { color: #bbf7d0; background: rgba(34,197,94,.13); border-color: rgba(34,197,94,.32); }
++    .empty, .alert { padding: 18px; border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,.055); color: var(--muted); line-height: 1.6; }
++    .alert { display: none; color: #fecdd3; border-color: rgba(251,113,133,.45); background: rgba(251,113,133,.10); margin-bottom: 14px; }
++    .success { color: #bbf7d0; border-color: rgba(34,197,94,.36); background: rgba(34,197,94,.11); }
++    .hidden { display: none !important; }
++    .section { display: none; }
++    .section.active { display: block; }
++    .message-card { border: 1px solid var(--line); background: rgba(5,9,20,.42); border-radius: 18px; padding: 16px; display: grid; gap: 12px; margin-bottom: 12px; }
++    .message-top { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
++    .message-top h4 { margin: 0; font-size: 17px; }
++    .message-card textarea { min-height: 180px; }
++    .loader { width: 17px; height: 17px; border: 3px solid rgba(0,0,0,.15); border-top-color: #141414; border-radius: 999px; display: none; animation: spin .8s linear infinite; }
++    .loading .loader { display: inline-block; }
++    @keyframes spin { to { transform: rotate(360deg); } }
++    @media (max-width: 1050px) { .hero, .grid-main { grid-template-columns: 1fr; } .workflow { grid-template-columns: repeat(2, 1fr); } }
++    @media (max-width: 660px) { .page { width: min(100% - 18px, 1420px); } .topbar { align-items: flex-start; flex-direction: column; } .grid-2, .toggles, .summary { grid-template-columns: 1fr; } .workflow { grid-template-columns: 1fr; } .hero-copy { padding: 22px; } }
++  </style>
++</head>
++<body>
++  <main class="page">
++    <div class="topbar">
++      <div class="brand">
++        <div class="logo">🍽️</div>
++        <div>
++          <h1>Catering Outreach Platform</h1>
++          <p>Discovery → Qualification → Campaign → Outreach → Review → Send</p>
++        </div>
++      </div>
++      <div class="top-actions">
++        <input id="apiKey" class="api-key" placeholder="API key optional" />
++        <a class="link-pill" href="/docs" target="_blank">API Docs</a>
++        <button class="btn-soft" onclick="refreshAll()">Refresh</button>
++      </div>
++    </div>
++
++    <section class="hero">
++      <div class="card hero-copy">
++        <div class="eyebrow">Operational control center</div>
++        <h2>Real workflow, not demo screens.</h2>
++        <p>
++          Leads are scraped, scored, stored, assigned to campaigns, converted into personalized outreach drafts,
++          reviewed by a human, then sent through SendGrid when approved.
++        </p>
++        <div class="workflow">
++          <div class="flow-step"><strong>1. Discover</strong><span>Apify search</span></div>
++          <div class="flow-step"><strong>2. Qualify</strong><span>Score + status</span></div>
++          <div class="flow-step"><strong>3. Assign</strong><span>Campaign persistence</span></div>
++          <div class="flow-step"><strong>4. Draft</strong><span>Auto outreach</span></div>
++          <div class="flow-step"><strong>5. Review</strong><span>Approve + send</span></div>
++        </div>
++      </div>
++      <div class="card summary">
++        <div class="metric"><span>Total leads</span><strong id="mTotalLeads">0</strong></div>
++        <div class="metric"><span>Campaigns</span><strong id="mCampaigns">0</strong></div>
++        <div class="metric"><span>Assigned leads</span><strong id="mAssigned">0</strong></div>
++        <div class="metric"><span>Outreach drafts</span><strong id="mOutreach">0</strong></div>
++      </div>
++    </section>
++
++    <div id="alertBox" class="alert"></div>
++
++    <div class="tabs">
++      <button class="tab active" data-tab="discover">Discovery & Qualification</button>
++      <button class="tab" data-tab="campaigns">Campaign Management</button>
++      <button class="tab" data-tab="leads">Lead Assignment</button>
++      <button class="tab" data-tab="review">Outreach Review</button>
++      <button class="tab" data-tab="analytics">Analytics</button>
++    </div>
++
++    <section id="discover" class="section active">
++      <div class="grid-main">
++        <div class="card panel">
++          <h3>Trigger lead discovery</h3>
++          <p>This replaces manual API testing. Run discovery directly from the platform UI.</p>
++          <form id="discoverForm" class="form">
++            <div>
++              <label>Location</label>
++              <input id="location" value="New York, USA" required />
++            </div>
++            <div>
++              <label>Search terms</label>
++              <textarea id="searchTerms">catering companies
++corporate catering
++event catering
++wedding catering</textarea>
++            </div>
++            <div class="grid-2">
++              <div><label>Results per term</label><input id="maxResults" type="number" min="1" max="500" value="20" /></div>
++              <div><label>Leads per place</label><input id="maxLeads" type="number" min="0" max="10" value="1" /></div>
++            </div>
++            <div class="grid-2">
++              <div><label>Radius miles</label><input id="radius" type="number" value="10" /></div>
++              <div><label>Campaign</label><select id="discoverCampaign"><option value="">No campaign assignment</option></select></div>
++            </div>
++            <div class="grid-2">
++              <div><label>Reference lat</label><input id="referenceLat" type="number" step="any" placeholder="Optional" /></div>
++              <div><label>Reference lng</label><input id="referenceLng" type="number" step="any" placeholder="Optional" /></div>
++            </div>
++            <div class="toggles">
++              <label class="toggle">Require email <input id="requireEmail" type="checkbox" checked /></label>
++              <label class="toggle">Require phone <input id="requirePhone" type="checkbox" checked /></label>
++              <label class="toggle">Scrape contacts <input id="scrapeContacts" type="checkbox" checked /></label>
++              <label class="toggle">Auto-generate outreach <input id="autoOutreach" type="checkbox" checked /></label>
++            </div>
++            <button id="discoverBtn" class="btn-primary" type="submit"><span class="loader"></span><span>Run discovery</span></button>
++          </form>
++        </div>
++        <div class="card panel">
++          <div class="toolbar">
++            <div><h3>Latest discovered leads</h3><p>Scored and categorized after discovery.</p></div>
++            <button class="btn-soft" onclick="loadLeads()">Reload leads</button>
++          </div>
++          <div class="table-wrap">
++            <table>
++              <thead><tr><th>Business</th><th>Contact</th><th>Score</th><th>Status</th><th>Reason</th></tr></thead>
++              <tbody id="discoveredRows"><tr><td colspan="5" class="muted">No leads loaded yet.</td></tr></tbody>
++            </table>
++          </div>
++        </div>
++      </div>
++    </section>
++
++    <section id="campaigns" class="section">
++      <div class="grid-main">
++        <div class="card panel">
++          <h3>Create campaign</h3>
++          <p>Campaign details are used to generate personalized outreach drafts.</p>
++          <form id="campaignForm" class="form">
++            <div><label>Campaign name</label><input id="campaignName" placeholder="Corporate catering June outreach" required /></div>
++            <div><label>Target audience</label><input id="targetAudience" placeholder="Offices, venues, event planners" /></div>
++            <div><label>Offer</label><textarea id="campaignOffer" placeholder="Example: 20% off first corporate lunch order"></textarea></div>
++            <div><label>Tone</label><select id="campaignTone"><option value="professional">Professional</option><option value="friendly">Friendly</option></select></div>
++            <div><label>Description</label><textarea id="campaignDescription" placeholder="Internal notes"></textarea></div>
++            <button class="btn-primary" type="submit">Create campaign</button>
++          </form>
++        </div>
++        <div class="card panel">
++          <div class="toolbar"><div><h3>Campaigns</h3><p>Real stored campaigns with assignment and draft counts.</p></div><button class="btn-soft" onclick="loadCampaigns()">Reload</button></div>
++          <div class="table-wrap">
++            <table>
++              <thead><tr><th>Name</th><th>Offer</th><th>Status</th><th>Assigned</th><th>Drafts</th></tr></thead>
++              <tbody id="campaignRows"><tr><td colspan="5" class="muted">No campaigns yet.</td></tr></tbody>
++            </table>
++          </div>
++        </div>
++      </div>
++    </section>
++
++    <section id="leads" class="section">
++      <div class="card panel">
++        <div class="toolbar">
++          <div class="toolbar-left">
++            <select id="assignCampaign"></select>
++            <select id="statusFilter" onchange="loadLeads()"><option value="">All statuses</option><option>Qualified</option><option>Review Required</option><option>Rejected</option></select>
++            <input id="leadFilter" class="filter" placeholder="Filter leads" oninput="renderLeadAssignment()" />
++          </div>
++          <div class="toolbar-right">
++            <button class="btn-soft" onclick="loadLeads()">Reload</button>
++            <button class="btn-primary" onclick="assignSelectedLeads()">Assign selected + generate drafts</button>
++          </div>
++        </div>
++        <div class="table-wrap">
++          <table>
++            <thead><tr><th><input type="checkbox" onchange="toggleAllLeads(this)" /></th><th>Business</th><th>Email</th><th>Phone</th><th>Score</th><th>Status</th><th>Email check</th></tr></thead>
++            <tbody id="leadAssignRows"><tr><td colspan="7" class="muted">No leads loaded.</td></tr></tbody>
++          </table>
++        </div>
++      </div>
++    </section>
++
++    <section id="review" class="section">
++      <div class="card panel">
++        <div class="toolbar">
++          <div class="toolbar-left">
++            <select id="reviewStatus" onchange="loadReviewQueue()"><option value="review_required">Review Required</option><option value="approved">Approved</option><option value="sent">Sent</option><option value="">All</option></select>
++            <select id="reviewCampaign" onchange="loadReviewQueue()"><option value="">All campaigns</option></select>
++          </div>
++          <button class="btn-soft" onclick="loadReviewQueue()">Reload queue</button>
++        </div>
++        <div id="reviewList" class="empty">No outreach messages loaded.</div>
++      </div>
++    </section>
++
++    <section id="analytics" class="section">
++      <div class="card panel">
++        <div class="toolbar"><div><h3>Delivery and workflow analytics</h3><p>Counts are based on real database records.</p></div><button class="btn-soft" onclick="loadSummary()">Reload</button></div>
++        <div id="analyticsBody" class="summary"></div>
++      </div>
++    </section>
++  </main>
++
++<script>
++  const state = { leads: [], campaigns: [], review: [] };
++
++  function headers() {
++    const key = document.getElementById('apiKey').value.trim();
++    const h = { 'Content-Type': 'application/json' };
++    if (key) h['X-API-Key'] = key;
++    return h;
++  }
++
++  async function api(path, options = {}) {
++    const response = await fetch(path, {
++      ...options,
++      headers: { ...headers(), ...(options.headers || {}) }
++    });
++    const contentType = response.headers.get('content-type') || '';
++    const data = contentType.includes('application/json') ? await response.json() : await response.text();
++    if (!response.ok) throw new Error(data.detail || data.message || data || 'Request failed');
++    return data;
++  }
++
++  function notify(message, type = 'error') {
++    const box = document.getElementById('alertBox');
++    box.textContent = message;
++    box.className = `alert ${type === 'success' ? 'success' : ''}`;
++    box.style.display = 'block';
++    setTimeout(() => { box.style.display = 'none'; }, 7000);
++  }
++
++  function badge(value) {
++    const v = value || 'Review Required';
++    const cls = v === 'Qualified' ? 'b-qualified' : v === 'Rejected' ? 'b-rejected' : v === 'sent' ? 'b-sent' : v === 'approved' || v === 'review_required' ? 'b-draft' : 'b-review';
++    return `<span class="badge ${cls}">${v}</span>`;
++  }
++
++  function parseTerms(value) {
++    return value.split(/[\n,]+/).map(v => v.trim()).filter(Boolean);
++  }
++
++  function setLoading(btn, loading) {
++    if (!btn) return;
++    btn.disabled = loading;
++    btn.classList.toggle('loading', loading);
++  }
++
++  function switchTab(name) {
++    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
++    document.querySelectorAll('.section').forEach(s => s.classList.toggle('active', s.id === name));
++  }
++
++  document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => switchTab(tab.dataset.tab)));
++
++  document.getElementById('apiKey').value = localStorage.getItem('catering_api_key') || '';
++  document.getElementById('apiKey').addEventListener('change', e => localStorage.setItem('catering_api_key', e.target.value.trim()));
++
++  document.getElementById('discoverForm').addEventListener('submit', async (e) => {
++    e.preventDefault();
++    const btn = document.getElementById('discoverBtn');
++    setLoading(btn, true);
++    try {
++      const referenceLat = document.getElementById('referenceLat').value;
++      const referenceLng = document.getElementById('referenceLng').value;
++      const payload = {
++        location: document.getElementById('location').value.trim(),
++        search_terms: parseTerms(document.getElementById('searchTerms').value),
++        max_results_per_search: Number(document.getElementById('maxResults').value || 20),
++        require_email: document.getElementById('requireEmail').checked,
++        require_phone: document.getElementById('requirePhone').checked,
++        send_to_n8n: false,
++        scrape_contacts: document.getElementById('scrapeContacts').checked,
++        max_leads_per_place: Number(document.getElementById('maxLeads').value || 1),
++        radius_miles: Number(document.getElementById('radius').value || 10),
++        reference_lat: referenceLat ? Number(referenceLat) : null,
++        reference_lng: referenceLng ? Number(referenceLng) : null,
++        campaign_id: document.getElementById('discoverCampaign').value || null,
++        auto_generate_outreach: document.getElementById('autoOutreach').checked
++      };
++      const data = await api('/api/leads/generate', { method: 'POST', body: JSON.stringify(payload) });
++      notify(`Discovery complete. Stored ${data.total_stored_leads} leads, assigned ${data.total_assigned_to_campaign}, generated ${data.total_outreach_generated} drafts.`, 'success');
++      await refreshAll();
++      switchTab('discover');
++    } catch (err) {
++      notify(err.message);
++    } finally {
++      setLoading(btn, false);
++    }
++  });
++
++  document.getElementById('campaignForm').addEventListener('submit', async (e) => {
++    e.preventDefault();
++    try {
++      const payload = {
++        name: document.getElementById('campaignName').value.trim(),
++        target_audience: document.getElementById('targetAudience').value.trim(),
++        offer: document.getElementById('campaignOffer').value.trim(),
++        tone: document.getElementById('campaignTone').value,
++        description: document.getElementById('campaignDescription').value.trim(),
++        status: 'active'
++      };
++      await api('/api/campaigns', { method: 'POST', body: JSON.stringify(payload) });
++      e.target.reset();
++      notify('Campaign created.', 'success');
++      await loadCampaigns();
++      await loadSummary();
++    } catch (err) { notify(err.message); }
++  });
++
++  async function loadSummary() {
++    const data = await api('/api/dashboard/summary');
++    const totals = data.totals || {};
++    document.getElementById('mTotalLeads').textContent = totals.total_leads || 0;
++    document.getElementById('mCampaigns').textContent = totals.total_campaigns || 0;
++    document.getElementById('mAssigned').textContent = totals.assigned_leads || 0;
++    document.getElementById('mOutreach').textContent = totals.outreach_messages || 0;
++    document.getElementById('analyticsBody').innerHTML = `
++      <div class="metric"><span>Qualified</span><strong>${countFrom(data.lead_counts, 'Qualified')}</strong></div>
++      <div class="metric"><span>Review required</span><strong>${countFrom(data.lead_counts, 'Review Required')}</strong></div>
++      <div class="metric"><span>Rejected</span><strong>${countFrom(data.lead_counts, 'Rejected')}</strong></div>
++      <div class="metric"><span>Sent</span><strong>${countFrom(data.outreach_counts, 'sent')}</strong></div>
++    `;
++  }
++
++  function countFrom(items, status) {
++    const found = (items || []).find(i => i.status === status);
++    return found ? found.total : 0;
++  }
++
++  async function loadCampaigns() {
++    state.campaigns = await api('/api/campaigns');
++    renderCampaigns();
++    renderCampaignSelects();
++  }
++
++  function renderCampaigns() {
++    const rows = document.getElementById('campaignRows');
++    if (!state.campaigns.length) {
++      rows.innerHTML = '<tr><td colspan="5" class="muted">No campaigns yet.</td></tr>';
++      return;
++    }
++    rows.innerHTML = state.campaigns.map(c => `
++      <tr>
++        <td><strong>${escapeHtml(c.name)}</strong><div class="muted">${escapeHtml(c.target_audience || '')}</div></td>
++        <td>${escapeHtml(c.offer || '—')}</td>
++        <td>${badge(c.status)}</td>
++        <td>${c.assigned_leads || 0}</td>
++        <td>${c.outreach_messages || 0}</td>
++      </tr>
++    `).join('');
++  }
++
++  function renderCampaignSelects() {
++    const options = state.campaigns.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
++    document.getElementById('discoverCampaign').innerHTML = `<option value="">No campaign assignment</option>${options}`;
++    document.getElementById('assignCampaign').innerHTML = options || '<option value="">Create a campaign first</option>';
++    document.getElementById('reviewCampaign').innerHTML = `<option value="">All campaigns</option>${options}`;
++  }
++
++  async function loadLeads() {
++    const status = document.getElementById('statusFilter')?.value || '';
++    const path = status ? `/api/leads?status=${encodeURIComponent(status)}&limit=500` : '/api/leads?limit=500';
++    state.leads = await api(path);
++    renderDiscoveryRows();
++    renderLeadAssignment();
++  }
++
++  function renderDiscoveryRows() {
++    const body = document.getElementById('discoveredRows');
++    const leads = state.leads.slice(0, 40);
++    if (!leads.length) { body.innerHTML = '<tr><td colspan="5" class="muted">No leads loaded yet.</td></tr>'; return; }
++    body.innerHTML = leads.map(l => `
++      <tr>
++        <td><strong>${escapeHtml(l.business_name || '—')}</strong><div class="muted">${escapeHtml(l.category || '')}</div></td>
++        <td>${escapeHtml(l.email || '—')}<div class="muted">${escapeHtml(l.phone || '')}</div></td>
++        <td><strong>${l.score || 0}</strong></td>
++        <td>${badge(l.qualification_status)}</td>
++        <td class="muted">${escapeHtml(l.qualification_reason || '')}</td>
++      </tr>
++    `).join('');
++  }
++
++  function renderLeadAssignment() {
++    const q = (document.getElementById('leadFilter').value || '').toLowerCase();
++    const body = document.getElementById('leadAssignRows');
++    const leads = state.leads.filter(l => JSON.stringify(l).toLowerCase().includes(q));
++    if (!leads.length) { body.innerHTML = '<tr><td colspan="7" class="muted">No leads found.</td></tr>'; return; }
++    body.innerHTML = leads.map(l => `
++      <tr>
++        <td><input class="leadCheck" type="checkbox" value="${l.id}" ${l.qualification_status !== 'Qualified' ? 'disabled' : ''} /></td>
++        <td><strong>${escapeHtml(l.business_name || '—')}</strong><div class="muted">${escapeHtml(l.address || '')}</div></td>
++        <td>${escapeHtml(l.email || '—')}</td>
++        <td>${escapeHtml(l.phone || '—')}</td>
++        <td><strong>${l.score || 0}</strong></td>
++        <td>${badge(l.qualification_status)}</td>
++        <td>${escapeHtml(l.email_verification_status || 'missing')}<div class="muted">${escapeHtml(l.email_verification_reason || '')}</div></td>
++      </tr>
++    `).join('');
++  }
++
++  function toggleAllLeads(box) {
++    document.querySelectorAll('.leadCheck:not(:disabled)').forEach(cb => cb.checked = box.checked);
++  }
++
++  async function assignSelectedLeads() {
++    const campaignId = document.getElementById('assignCampaign').value;
++    const ids = [...document.querySelectorAll('.leadCheck:checked')].map(i => i.value);
++    if (!campaignId) return notify('Create/select a campaign first.');
++    if (!ids.length) return notify('Select at least one qualified lead.');
++    try {
++      const data = await api(`/api/campaigns/${campaignId}/assign-leads`, {
++        method: 'POST',
++        body: JSON.stringify({ lead_ids: ids, only_qualified: true, auto_generate_outreach: true })
++      });
++      notify(`Assigned ${data.assigned_lead_ids.length} leads and generated ${data.outreach_generated} drafts.`, 'success');
++      await refreshAll();
++      switchTab('review');
++    } catch (err) { notify(err.message); }
++  }
++
++  async function loadReviewQueue() {
++    const status = document.getElementById('reviewStatus').value;
++    const campaignId = document.getElementById('reviewCampaign').value;
++    const params = new URLSearchParams();
++    if (status) params.set('status', status);
++    if (campaignId) params.set('campaign_id', campaignId);
++    state.review = await api(`/api/outreach/review-queue?${params.toString()}`);
++    renderReviewQueue();
++  }
++
++  function renderReviewQueue() {
++    const list = document.getElementById('reviewList');
++    if (!state.review.length) { list.className = 'empty'; list.innerHTML = 'No outreach messages found for this filter.'; return; }
++    list.className = '';
++    list.innerHTML = state.review.map(m => `
++      <div class="message-card" data-message-id="${m.id}">
++        <div class="message-top">
++          <div><h4>${escapeHtml(m.business_name || 'Unknown business')}</h4><div class="muted">${escapeHtml(m.email || 'No email')} • ${escapeHtml(m.campaign_name || '')}</div></div>
++          <div>${badge(m.status)} ${badge(m.delivery_status)}</div>
++        </div>
++        <div><label>Subject</label><input class="msgSubject" value="${escapeAttr(m.subject || '')}" /></div>
++        <div><label>Body</label><textarea class="msgBody">${escapeHtml(m.body || '')}</textarea></div>
++        <div class="toolbar-right">
++          <button class="btn-soft" onclick="saveMessage('${m.id}')">Save edits</button>
++          <button class="btn-green" onclick="approveMessage('${m.id}')">Approve</button>
++          <button class="btn-primary" onclick="sendMessage('${m.id}')">Send</button>
++        </div>
++      </div>
++    `).join('');
++  }
++
++  async function saveMessage(id) {
++    const card = document.querySelector(`[data-message-id="${id}"]`);
++    try {
++      await api(`/api/outreach/${id}`, {
++        method: 'PUT',
++        body: JSON.stringify({ subject: card.querySelector('.msgSubject').value, body: card.querySelector('.msgBody').value })
++      });
++      notify('Message saved.', 'success');
++      await loadReviewQueue();
++    } catch (err) { notify(err.message); }
++  }
++
++  async function approveMessage(id) {
++    try {
++      await api(`/api/outreach/${id}/approve`, { method: 'POST', body: '{}' });
++      notify('Message approved.', 'success');
++      await loadReviewQueue();
++      await loadSummary();
++    } catch (err) { notify(err.message); }
++  }
++
++  async function sendMessage(id) {
++    try {
++      await api(`/api/outreach/${id}/send`, { method: 'POST', body: '{}' });
++      notify('Message sent through SendGrid.', 'success');
++      await loadReviewQueue();
++      await loadSummary();
++    } catch (err) { notify(err.message); }
++  }
++
++  function escapeHtml(value) {
++    return String(value ?? '').replace(/[&<>"]/g, s => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[s]));
++  }
++  function escapeAttr(value) { return escapeHtml(value).replace(/'/g, '&#039;'); }
++
++  async function refreshAll() {
++    try {
++      await loadCampaigns();
++      await loadLeads();
++      await loadReviewQueue();
++      await loadSummary();
++    } catch (err) {
++      notify(err.message);
++    }
++  }
++
++  refreshAll();
++</script>
++</body>
++</html>
+diff --git a/app/lead_utils.py b/app/lead_utils.py
+index c74c343..6fa62fa 100644
+--- a/app/lead_utils.py
++++ b/app/lead_utils.py
+@@ -1,8 +1,36 @@
+-from typing import Any, Dict, List, Optional
++from typing import Any, Dict, List, Optional, Tuple
+ import re
++import socket
+ 
+ 
+-EMAIL_REGEX = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
++EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
++EMAIL_FIND_REGEX = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
++
++ROLE_EMAIL_PREFIXES = {
++    "info",
++    "contact",
++    "hello",
++    "admin",
++    "support",
++    "sales",
++    "office",
++    "team",
++    "enquiries",
++    "inquiries",
++}
++
++DISPOSABLE_DOMAINS = {
++    "mailinator.com",
++    "tempmail.com",
++    "10minutemail.com",
++    "guerrillamail.com",
++    "yopmail.com",
++}
++
++
++QUALIFIED = "Qualified"
++REVIEW_REQUIRED = "Review Required"
++REJECTED = "Rejected"
+ 
+ 
+ def normalize_phone(value: Any) -> Optional[str]:
+@@ -22,8 +50,8 @@ def extract_email_from_text(value: Any) -> Optional[str]:
+         return None
+ 
+     if isinstance(value, str):
+-        match = EMAIL_REGEX.search(value)
+-        return match.group(0) if match else None
++        match = EMAIL_FIND_REGEX.search(value)
++        return match.group(0).strip(".,;:()[]{}<>") if match else None
+ 
+     return None
+ 
+@@ -63,7 +91,6 @@ def extract_email_from_nested_data(item: Dict[str, Any]) -> Optional[str]:
+                         if email:
+                             return email
+ 
+-    # Check contact details lists
+     possible_nested_lists = [
+         "contacts",
+         "contactDetails",
+@@ -90,19 +117,18 @@ def extract_email_from_nested_data(item: Dict[str, Any]) -> Optional[str]:
+                         return email
+ 
+         elif isinstance(nested, dict):
+-            for key, value in nested.items():
++            for _, value in nested.items():
+                 email = extract_email_from_text(value)
+                 if email:
+                     return email
+ 
+-    # Final fallback: scan the whole item as text
+     email = extract_email_from_text(str(item))
+     return email
+ 
+ 
+ def normalize_lead(item: Dict[str, Any]) -> Dict[str, Any]:
+     """
+-    Converts raw Apify item to our clean lead format.
++    Converts raw Apify item to the clean lead format used by this app.
+     """
+ 
+     business_name = (
+@@ -152,7 +178,6 @@ def normalize_lead(item: Dict[str, Any]) -> Dict[str, Any]:
+     lat = item.get("lat") or item.get("latitude")
+     lng = item.get("lng") or item.get("longitude")
+ 
+-    # Apify's Google Places scraper often returns location in a nested object
+     if not lat and isinstance(item.get("location"), dict):
+         lat = item.get("location", {}).get("lat")
+     if not lng and isinstance(item.get("location"), dict):
+@@ -163,7 +188,7 @@ def normalize_lead(item: Dict[str, Any]) -> Dict[str, Any]:
+         "phone": phone,
+         "email": email,
+         "website": website,
+-        "address": address,
++        "address": address if isinstance(address, str) else None,
+         "category": category,
+         "google_maps_url": google_maps_url,
+         "source": "apify_google_places",
+@@ -172,6 +197,103 @@ def normalize_lead(item: Dict[str, Any]) -> Dict[str, Any]:
+     }
+ 
+ 
++def verify_email_basic(email: Optional[str]) -> Tuple[str, str]:
++    """
++    Lightweight email verification layer.
++    This is intentionally not a paid verifier. It checks syntax, disposable domains,
++    and whether the domain resolves. Real mailbox validation should be plugged in later.
++    """
++
++    if not email:
++        return "missing", "No email found."
++
++    email = email.strip().lower()
++
++    if not EMAIL_REGEX.match(email):
++        return "invalid", "Email syntax is invalid."
++
++    local_part, domain = email.rsplit("@", 1)
++
++    if domain in DISPOSABLE_DOMAINS:
++        return "risky", "Disposable email domain."
++
++    if local_part in ROLE_EMAIL_PREFIXES:
++        return "valid_role", "Role-based business email."
++
++    try:
++        socket.gethostbyname(domain)
++    except Exception:
++        return "risky", "Email domain could not be resolved."
++
++    return "valid", "Email syntax and domain look valid."
++
++
++def score_and_categorize_lead(
++    lead: Dict[str, Any],
++    search_terms: Optional[List[str]] = None,
++) -> Dict[str, Any]:
++    score = 0
++    reasons: List[str] = []
++
++    if lead.get("business_name"):
++        score += 15
++        reasons.append("Business name found")
++
++    if lead.get("email"):
++        score += 25
++        reasons.append("Email found")
++
++    if lead.get("phone"):
++        score += 20
++        reasons.append("Phone found")
++
++    if lead.get("website"):
++        score += 15
++        reasons.append("Website found")
++
++    if lead.get("address"):
++        score += 10
++        reasons.append("Address found")
++
++    if lead.get("google_maps_url"):
++        score += 5
++        reasons.append("Google Maps profile found")
++
++    category = (lead.get("category") or "").lower()
++    business_name = (lead.get("business_name") or "").lower()
++    terms = [term.lower() for term in (search_terms or [])]
++
++    if any(term in category or term in business_name for term in terms):
++        score += 10
++        reasons.append("Matches campaign/search intent")
++
++    email_status, email_reason = verify_email_basic(lead.get("email"))
++    lead["email_verification_status"] = email_status
++    lead["email_verification_reason"] = email_reason
++
++    if email_status in {"valid", "valid_role"}:
++        score += 5
++        reasons.append(email_reason)
++    elif email_status == "risky":
++        score -= 5
++        reasons.append(email_reason)
++
++    score = max(0, min(score, 100))
++
++    if score >= 70:
++        status = QUALIFIED
++    elif score >= 45:
++        status = REVIEW_REQUIRED
++    else:
++        status = REJECTED
++
++    lead["score"] = score
++    lead["qualification_status"] = status
++    lead["qualification_reason"] = "; ".join(reasons) if reasons else "Insufficient lead data."
++
++    return lead
++
++
+ def is_valid_lead(
+     lead: Dict[str, Any],
+     require_email: bool = True,
+@@ -186,4 +308,4 @@ def is_valid_lead(
+     if require_email and not lead.get("email"):
+         return False
+ 
+-    return True
+\ No newline at end of file
++    return True
+diff --git a/app/main.py b/app/main.py
+index e7540ac..7befa1e 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -1,20 +1,58 @@
+-# app/main.py
+-from fastapi import FastAPI, HTTPException, BackgroundTasks
++from pathlib import Path
++from typing import List, Optional
++
++from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
+ from fastapi.middleware.cors import CORSMiddleware
+-from app.schemas import LeadSearchRequest, LeadSearchResponse, Lead
++from fastapi.responses import FileResponse
++from geopy.distance import geodesic
++
+ from app.apify_service import ApifyService
++from app.auth import require_api_key
++from app.database import (
++    assign_leads_to_campaign,
++    create_campaign,
++    create_or_update_outreach_message,
++    dashboard_summary,
++    get_campaign,
++    get_campaign_assigned_leads,
++    get_lead,
++    get_outreach_message,
++    init_db,
++    list_campaigns,
++    list_leads,
++    list_outreach_messages,
++    now_iso,
++    update_campaign,
++    update_outreach_message,
++    upsert_lead,
++)
++from app.email_service import EmailService
++from app.lead_utils import is_valid_lead, normalize_lead, score_and_categorize_lead
+ from app.n8n_service import N8NService
+-from app.lead_utils import normalize_lead, is_valid_lead
++from app.outreach_service import OutreachService
++from app.schemas import (
++    AssignLeadsRequest,
++    AssignLeadsResponse,
++    Campaign,
++    CampaignCreate,
++    CampaignUpdate,
++    DashboardSummary,
++    GenerateOutreachRequest,
++    Lead,
++    LeadSearchRequest,
++    LeadSearchResponse,
++    OutreachMessage,
++    OutreachUpdate,
++    SendResponse,
++)
+ 
+-from geopy.distance import geodesic
+ 
+ app = FastAPI(
+-    title="Google Places Lead Generation API",
+-    version="1.4.0",
+-    description="FastAPI API for generating business leads via Apify and sending them to n8n."
++    title="Catering Outreach Platform API",
++    version="2.0.0",
++    description="Lead discovery, scoring, campaign assignment, outreach review, and email delivery workflow.",
+ )
+ 
+-# CORS setup
+ app.add_middleware(
+     CORSMiddleware,
+     allow_origins=["*"],
+@@ -23,62 +61,117 @@ app.add_middleware(
+     allow_headers=["*"],
+ )
+ 
+-@app.get("/")
++FRONTEND_PATH = Path(__file__).parent / "frontend" / "index.html"
++
++
++@app.on_event("startup")
++def startup_event() -> None:
++    init_db()
++
++
++@app.get("/", include_in_schema=False)
+ def root():
+-    return {"message": "Lead Generation API is running", "docs": "/docs"}
++    if FRONTEND_PATH.exists():
++        return FileResponse(FRONTEND_PATH)
++    return {"message": "Catering Outreach Platform API is running", "docs": "/docs"}
++
+ 
+ @app.get("/health")
+ def health():
+     return {"status": "ok"}
+ 
+-@app.post("/api/leads/generate", response_model=LeadSearchResponse)
++
++def _generate_outreach_for_leads(campaign_id: str, leads: List[dict]) -> List[dict]:
++    campaign = get_campaign(campaign_id)
++    if not campaign:
++        raise HTTPException(status_code=404, detail="Campaign not found.")
++
++    service = OutreachService()
++    generated = []
++
++    for lead in leads:
++        if lead.get("qualification_status") != "Qualified":
++            continue
++
++        message = service.build_message(campaign, lead)
++        generated.append(
++            create_or_update_outreach_message(
++                campaign_id=campaign_id,
++                lead_id=lead["id"],
++                subject=message["subject"],
++                body=message["body"],
++                status="review_required",
++            )
++        )
++
++    return generated
++
++
++@app.post(
++    "/api/leads/generate",
++    response_model=LeadSearchResponse,
++    dependencies=[Depends(require_api_key)],
++)
+ async def generate_leads(request: LeadSearchRequest, background_tasks: BackgroundTasks):
+     apify_service = ApifyService()
+     n8n_service = N8NService()
+ 
++    if request.campaign_id and not get_campaign(request.campaign_id):
++        raise HTTPException(status_code=404, detail="Campaign not found.")
++
+     try:
+-        # -------------------------
+-        # 1. Send only valid fields to Apify
+-        # -------------------------
+         raw_results = await apify_service.run_google_places_scraper(
+             location=request.location,
+             search_terms=request.search_terms,
+             max_results_per_search=request.max_results_per_search,
+             scrape_contacts=request.scrape_contacts,
+             max_leads_per_place=request.max_leads_per_place,
+-            verify_emails=True
++            verify_emails=True,
+         )
+ 
+-        # -------------------------
+-        # 2. Normalize & filter by phone/email
+-        # -------------------------
+         valid_leads = []
++        stored_leads = []
++
+         for item in raw_results:
+             normalized = normalize_lead(item)
+-            if is_valid_lead(
++
++            if not is_valid_lead(
+                 normalized,
+                 require_email=request.require_email,
+                 require_phone=request.require_phone,
+             ):
+-                valid_leads.append(normalized)
++                continue
++
++            scored = score_and_categorize_lead(normalized, search_terms=request.search_terms)
++            valid_leads.append(scored)
+ 
+-        # -------------------------
+-        # 3. Apply radius filter locally (optional)
+-        # -------------------------
+         if request.reference_lat is not None and request.reference_lng is not None:
+             ref_coords = (request.reference_lat, request.reference_lng)
+             filtered_leads = []
++
+             for lead in valid_leads:
+                 lat = lead.get("lat") or lead.get("latitude")
+                 lng = lead.get("lng") or lead.get("longitude")
+-                if lat and lng:
+-                    if geodesic(ref_coords, (lat, lng)).miles <= request.radius_miles:
+-                        filtered_leads.append(lead)
++
++                if lat and lng and geodesic(ref_coords, (lat, lng)).miles <= request.radius_miles:
++                    filtered_leads.append(lead)
++
+             valid_leads = filtered_leads
+ 
+-        # -------------------------
+-        # 4. Send to n8n asynchronously
+-        # -------------------------
++        for lead in valid_leads:
++            stored_leads.append(upsert_lead(lead, raw=lead))
++
++        assigned_ids: List[str] = []
++        generated_messages: List[dict] = []
++
++        if request.campaign_id:
++            qualified_ids = [lead["id"] for lead in stored_leads if lead.get("qualification_status") == "Qualified"]
++            assigned_ids = assign_leads_to_campaign(request.campaign_id, qualified_ids)
++
++            if request.auto_generate_outreach:
++                assigned_leads = [lead for lead in stored_leads if lead["id"] in assigned_ids]
++                generated_messages = _generate_outreach_for_leads(request.campaign_id, assigned_leads)
++
+         if request.send_to_n8n:
+             async def send_to_n8n_task(leads):
+                 for lead in leads:
+@@ -87,26 +180,208 @@ async def generate_leads(request: LeadSearchRequest, background_tasks: Backgroun
+                     except Exception as e:
+                         print(f"[Warning] Failed to send lead to n8n: {e}")
+ 
+-            background_tasks.add_task(send_to_n8n_task, valid_leads)
++            background_tasks.add_task(send_to_n8n_task, stored_leads)
+ 
+-        # -------------------------
+-        # 5. Return response
+-        # -------------------------
+         return LeadSearchResponse(
+             status="success",
+             total_raw_results=len(raw_results),
+             total_valid_leads=len(valid_leads),
+-            total_sent_to_n8n=0,  # async
+-            leads=[Lead(**lead) for lead in valid_leads]
++            total_stored_leads=len(stored_leads),
++            total_assigned_to_campaign=len(assigned_ids),
++            total_outreach_generated=len(generated_messages),
++            total_sent_to_n8n=0,
++            leads=[Lead(**lead) for lead in stored_leads],
+         )
+ 
++    except HTTPException:
++        raise
+     except Exception as e:
+         raise HTTPException(status_code=500, detail=str(e))
+ 
+-# -------------------------
+-# n8n test endpoint
+-# -------------------------
+-@app.post("/api/leads/test-n8n")
++
++@app.get("/api/leads", response_model=List[Lead], dependencies=[Depends(require_api_key)])
++def get_leads(
++    status: Optional[str] = Query(default=None),
++    limit: int = Query(default=200, ge=1, le=1000),
++):
++    return [Lead(**lead) for lead in list_leads(status=status, limit=limit)]
++
++
++@app.get("/api/dashboard/summary", response_model=DashboardSummary, dependencies=[Depends(require_api_key)])
++def get_dashboard_summary():
++    return dashboard_summary()
++
++
++@app.post("/api/campaigns", response_model=Campaign, dependencies=[Depends(require_api_key)])
++def create_campaign_endpoint(payload: CampaignCreate):
++    return Campaign(**create_campaign(payload.model_dump()))
++
++
++@app.get("/api/campaigns", response_model=List[Campaign], dependencies=[Depends(require_api_key)])
++def list_campaigns_endpoint():
++    return [Campaign(**campaign) for campaign in list_campaigns()]
++
++
++@app.get("/api/campaigns/{campaign_id}", response_model=Campaign, dependencies=[Depends(require_api_key)])
++def get_campaign_endpoint(campaign_id: str):
++    campaign = get_campaign(campaign_id)
++    if not campaign:
++        raise HTTPException(status_code=404, detail="Campaign not found.")
++    return Campaign(**campaign)
++
++
++@app.put("/api/campaigns/{campaign_id}", response_model=Campaign, dependencies=[Depends(require_api_key)])
++def update_campaign_endpoint(campaign_id: str, payload: CampaignUpdate):
++    campaign = update_campaign(campaign_id, payload.model_dump(exclude_unset=True))
++    if not campaign:
++        raise HTTPException(status_code=404, detail="Campaign not found.")
++    return Campaign(**campaign)
++
++
++@app.post(
++    "/api/campaigns/{campaign_id}/assign-leads",
++    response_model=AssignLeadsResponse,
++    dependencies=[Depends(require_api_key)],
++)
++def assign_leads_endpoint(campaign_id: str, payload: AssignLeadsRequest):
++    if not get_campaign(campaign_id):
++        raise HTTPException(status_code=404, detail="Campaign not found.")
++
++    lead_ids = payload.lead_ids
++
++    if payload.only_qualified:
++        lead_ids = [
++            lead_id
++            for lead_id in lead_ids
++            if (get_lead(lead_id) or {}).get("qualification_status") == "Qualified"
++        ]
++
++    assigned_ids = assign_leads_to_campaign(campaign_id, lead_ids)
++    outreach_generated = []
++
++    if payload.auto_generate_outreach and assigned_ids:
++        assigned_leads = [get_lead(lead_id) for lead_id in assigned_ids]
++        outreach_generated = _generate_outreach_for_leads(
++            campaign_id,
++            [lead for lead in assigned_leads if lead],
++        )
++
++    return AssignLeadsResponse(
++        status="success",
++        assigned_lead_ids=assigned_ids,
++        outreach_generated=len(outreach_generated),
++    )
++
++
++@app.post(
++    "/api/campaigns/{campaign_id}/generate-outreach",
++    response_model=List[OutreachMessage],
++    dependencies=[Depends(require_api_key)],
++)
++def generate_outreach_endpoint(campaign_id: str, payload: GenerateOutreachRequest):
++    if not get_campaign(campaign_id):
++        raise HTTPException(status_code=404, detail="Campaign not found.")
++
++    if payload.lead_ids:
++        leads = [get_lead(lead_id) for lead_id in payload.lead_ids]
++        leads = [lead for lead in leads if lead]
++    else:
++        leads = get_campaign_assigned_leads(campaign_id)
++
++    messages = _generate_outreach_for_leads(campaign_id, leads)
++    return [OutreachMessage(**message) for message in messages]
++
++
++@app.get(
++    "/api/outreach/review-queue",
++    response_model=List[OutreachMessage],
++    dependencies=[Depends(require_api_key)],
++)
++def review_queue(
++    status: Optional[str] = Query(default="review_required"),
++    campaign_id: Optional[str] = Query(default=None),
++):
++    return [
++        OutreachMessage(**message)
++        for message in list_outreach_messages(status=status, campaign_id=campaign_id)
++    ]
++
++
++@app.put("/api/outreach/{message_id}", response_model=OutreachMessage, dependencies=[Depends(require_api_key)])
++def update_outreach_endpoint(message_id: str, payload: OutreachUpdate):
++    message = update_outreach_message(message_id, payload.model_dump(exclude_unset=True))
++    if not message:
++        raise HTTPException(status_code=404, detail="Outreach message not found.")
++    return OutreachMessage(**message)
++
++
++@app.post("/api/outreach/{message_id}/approve", response_model=OutreachMessage, dependencies=[Depends(require_api_key)])
++def approve_outreach(message_id: str):
++    message = update_outreach_message(
++        message_id,
++        {"status": "approved", "approved_at": now_iso()},
++    )
++    if not message:
++        raise HTTPException(status_code=404, detail="Outreach message not found.")
++    return OutreachMessage(**message)
++
++
++@app.post("/api/outreach/{message_id}/send", response_model=SendResponse, dependencies=[Depends(require_api_key)])
++async def send_outreach(message_id: str):
++    message = get_outreach_message(message_id)
++    if not message:
++        raise HTTPException(status_code=404, detail="Outreach message not found.")
++
++    if message.get("status") != "approved":
++        raise HTTPException(status_code=400, detail="Approve the outreach message before sending.")
++
++    provider_result = await EmailService().send_outreach(message)
++    updated = update_outreach_message(
++        message_id,
++        {
++            "status": "sent",
++            "delivery_status": "sent",
++            "provider_message_id": provider_result.get("provider_message_id"),
++            "sent_at": now_iso(),
++        },
++    )
++
++    return SendResponse(status="success", message=OutreachMessage(**updated), provider=provider_result)
++
++
++@app.post("/api/sendgrid/events", dependencies=[Depends(require_api_key)])
++async def sendgrid_events(request: Request):
++    events = await request.json()
++    if not isinstance(events, list):
++        events = [events]
++
++    updated = 0
++    for event in events:
++        message_id = event.get("outreach_message_id") or event.get("custom_args", {}).get("outreach_message_id")
++        delivery_status = event.get("event")
++
++        if not message_id or not delivery_status:
++            continue
++
++        message = update_outreach_message(
++            message_id,
++            {
++                "delivery_status": delivery_status,
++                "last_event_at": now_iso(),
++            },
++        )
++        if message:
++            updated += 1
++
++    return {"status": "success", "updated": updated}
++
++
++@app.get("/api/analytics", response_model=DashboardSummary, dependencies=[Depends(require_api_key)])
++def analytics():
++    return dashboard_summary()
++
++
++@app.post("/api/leads/test-n8n", dependencies=[Depends(require_api_key)])
+ async def test_n8n():
+     test_lead = {
+         "business_name": "Test Business",
+@@ -116,16 +391,12 @@ async def test_n8n():
+         "address": "123 Main St, Test City",
+         "category": "Law Office",
+         "google_maps_url": "https://maps.google.com",
+-        "source": "test"
++        "source": "test",
+     }
+ 
+     try:
+         n8n_service = N8NService()
+         await n8n_service.send_lead(test_lead)
+-        return {
+-            "status": "success",
+-            "message": "Test lead sent to n8n",
+-            "lead": test_lead
+-        }
++        return {"status": "success", "message": "Test lead sent to n8n", "lead": test_lead}
+     except Exception as e:
+-        raise HTTPException(status_code=500, detail=str(e))
+\ No newline at end of file
++        raise HTTPException(status_code=500, detail=str(e))
+diff --git a/app/outreach_service.py b/app/outreach_service.py
+new file mode 100644
+index 0000000..a6ebbf7
+--- /dev/null
++++ b/app/outreach_service.py
+@@ -0,0 +1,39 @@
++from typing import Any, Dict, List, Optional
++
++
++class OutreachService:
++    def build_message(self, campaign: Dict[str, Any], lead: Dict[str, Any]) -> Dict[str, str]:
++        business_name = lead.get("business_name") or "there"
++        campaign_name = campaign.get("name") or "our catering service"
++        offer = campaign.get("offer") or "a reliable catering solution for events, offices, and private functions"
++        tone = (campaign.get("tone") or "professional").lower()
++        target_audience = campaign.get("target_audience") or "local businesses and event organizers"
++
++        subject = f"Catering support for {business_name}"
++
++        greeting = f"Hello {business_name} team,"
++
++        if tone == "friendly":
++            body = (
++                f"{greeting}\n\n"
++                f"I came across {business_name} and thought this might be useful. "
++                f"We are currently running the {campaign_name} campaign for {target_audience}.\n\n"
++                f"The main offer is: {offer}.\n\n"
++                "If you handle events, staff meals, private functions, or group orders, "
++                "I would be happy to share a simple catering option that fits your needs.\n\n"
++                "Would you be open to a quick conversation this week?\n\n"
++                "Best regards,"
++            )
++        else:
++            body = (
++                f"{greeting}\n\n"
++                f"I am reaching out because {business_name} appears to be a strong fit for our "
++                f"{campaign_name} campaign, focused on {target_audience}.\n\n"
++                f"Current offer: {offer}.\n\n"
++                "We can support business lunches, events, staff meals, and group catering requirements "
++                "with a clear, reliable outreach and fulfillment process.\n\n"
++                "Would it be possible to schedule a brief call to understand whether this is relevant for your team?\n\n"
++                "Regards,"
++            )
++
++        return {"subject": subject, "body": body}
+diff --git a/app/schemas.py b/app/schemas.py
+index f8c674c..91a30f2 100644
+--- a/app/schemas.py
++++ b/app/schemas.py
+@@ -1,75 +1,30 @@
+-from typing import Optional, List
++from typing import Optional, List, Dict, Any
+ from pydantic import BaseModel, Field
+ 
+-class LeadSearchRequest(BaseModel):
+-    location: str = Field(
+-        ...,
+-        example="New York, USA",
+-        description="City or area where you want to search leads."
+-    )
+ 
++class LeadSearchRequest(BaseModel):
++    location: str = Field(..., example="New York, USA")
+     search_terms: List[str] = Field(
+-        default=[
+-            "law office",
+-            "school",
+-            "production studio",
+-            "insurance office",
+-            "corporate office"
+-        ],
+-        description="Google Maps search terms."
+-    )
+-
+-    max_results_per_search: int = Field(
+-        default=20,
+-        ge=1,
+-        le=500,
+-        description="How many places to scrape per search term."
+-    )
+-
+-    require_email: bool = Field(
+-        default=True,
+-        description="Only send leads that have an email."
+-    )
+-
+-    require_phone: bool = Field(
+-        default=True,
+-        description="Only send leads that have a phone."
+-    )
+-
+-    send_to_n8n: bool = Field(
+-        default=True,
+-        description="If false, only return leads in API response."
+-    )
+-
+-    scrape_contacts: bool = Field(
+-        default=True,
+-        description="Enable website contact enrichment in Apify."
+-    )
+-
+-    max_leads_per_place: int = Field(
+-        default=1,
+-        ge=0,
+-        le=10,
+-        description="Apify business lead enrichment records per place."
+-    )
+-
+-    radius_miles: float = Field(
+-        default=10.0,
+-        description="Radius in miles from the reference location to filter leads."
+-    )
+-
+-    reference_lat: Optional[float] = Field(
+-        None,
+-        description="Latitude of the reference location (e.g., restaurant)."
++        default=["law office", "school", "production studio", "insurance office", "corporate office"]
+     )
+-
+-    reference_lng: Optional[float] = Field(
+-        None,
+-        description="Longitude of the reference location (e.g., restaurant)."
++    max_results_per_search: int = Field(default=20, ge=1, le=500)
++    require_email: bool = True
++    require_phone: bool = True
++    send_to_n8n: bool = False
++    scrape_contacts: bool = True
++    max_leads_per_place: int = Field(default=1, ge=0, le=10)
++    radius_miles: float = 10.0
++    reference_lat: Optional[float] = None
++    reference_lng: Optional[float] = None
++    campaign_id: Optional[str] = Field(
++        default=None,
++        description="Optional. If provided, qualified leads are assigned to this campaign and outreach drafts are generated.",
+     )
++    auto_generate_outreach: bool = True
+ 
+ 
+ class Lead(BaseModel):
++    id: Optional[str] = None
+     business_name: Optional[str] = None
+     phone: Optional[str] = None
+     email: Optional[str] = None
+@@ -80,11 +35,113 @@ class Lead(BaseModel):
+     source: str = "apify_google_places"
+     lat: Optional[float] = None
+     lng: Optional[float] = None
++    score: int = 0
++    qualification_status: str = "Review Required"
++    qualification_reason: Optional[str] = None
++    email_verification_status: str = "missing"
++    email_verification_reason: Optional[str] = None
++    created_at: Optional[str] = None
++    updated_at: Optional[str] = None
+ 
+ 
+ class LeadSearchResponse(BaseModel):
+     status: str
+     total_raw_results: int
+     total_valid_leads: int
++    total_stored_leads: int
++    total_assigned_to_campaign: int = 0
++    total_outreach_generated: int = 0
+     total_sent_to_n8n: int
+-    leads: List[Lead]
+\ No newline at end of file
++    leads: List[Lead]
++
++
++class CampaignCreate(BaseModel):
++    name: str = Field(..., min_length=2, max_length=160)
++    description: Optional[str] = None
++    offer: Optional[str] = None
++    tone: str = "professional"
++    target_audience: Optional[str] = None
++    status: str = "active"
++
++
++class CampaignUpdate(BaseModel):
++    name: Optional[str] = None
++    description: Optional[str] = None
++    offer: Optional[str] = None
++    tone: Optional[str] = None
++    target_audience: Optional[str] = None
++    status: Optional[str] = None
++
++
++class Campaign(BaseModel):
++    id: str
++    name: str
++    description: Optional[str] = None
++    offer: Optional[str] = None
++    tone: str = "professional"
++    target_audience: Optional[str] = None
++    status: str = "active"
++    assigned_leads: int = 0
++    outreach_messages: int = 0
++    created_at: str
++    updated_at: str
++
++
++class AssignLeadsRequest(BaseModel):
++    lead_ids: List[str] = Field(default_factory=list)
++    only_qualified: bool = True
++    auto_generate_outreach: bool = True
++
++
++class AssignLeadsResponse(BaseModel):
++    status: str
++    assigned_lead_ids: List[str]
++    outreach_generated: int
++
++
++class GenerateOutreachRequest(BaseModel):
++    lead_ids: Optional[List[str]] = None
++    overwrite_existing: bool = False
++
++
++class OutreachMessage(BaseModel):
++    id: str
++    campaign_id: str
++    lead_id: str
++    subject: str
++    body: str
++    status: str = "review_required"
++    delivery_status: str = "not_sent"
++    provider_message_id: Optional[str] = None
++    created_at: str
++    updated_at: str
++    approved_at: Optional[str] = None
++    sent_at: Optional[str] = None
++    last_event_at: Optional[str] = None
++    business_name: Optional[str] = None
++    email: Optional[str] = None
++    phone: Optional[str] = None
++    website: Optional[str] = None
++    address: Optional[str] = None
++    score: Optional[int] = None
++    qualification_status: Optional[str] = None
++    campaign_name: Optional[str] = None
++
++
++class OutreachUpdate(BaseModel):
++    subject: Optional[str] = None
++    body: Optional[str] = None
++    status: Optional[str] = None
++
++
++class SendResponse(BaseModel):
++    status: str
++    message: OutreachMessage
++    provider: Optional[Dict[str, Any]] = None
++
++
++class DashboardSummary(BaseModel):
++    totals: Dict[str, Any]
++    lead_counts: List[Dict[str, Any]]
++    outreach_counts: List[Dict[str, Any]]
++    delivery_counts: List[Dict[str, Any]]
