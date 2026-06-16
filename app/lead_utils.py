@@ -3,8 +3,8 @@ import re
 import socket
 
 
-EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-EMAIL_FIND_REGEX = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
+EMAIL_FIND_REGEX = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
 
 ROLE_EMAIL_PREFIXES = {
     "info",
